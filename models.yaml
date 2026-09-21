@@ -1,0 +1,30 @@
+# Model registry. See idx_agent_infrastructure_diagrams_md.md section 5.
+#
+# Fields:
+#   name           public model name shown in LibreChat
+#   provider       strands model provider (anthropic, openai, ...)
+#   model_id       provider-specific model id
+#   key_ref        env var name holding the API key
+#   context_limit  used to trim history for this model
+#   supports_tools whether the model can be trusted with tool calling
+#   tier           cheap | standard | strong
+#   fallback       name of the registry entry to retry on provider errors
+
+models:
+  - name: idx-analyst-claude
+    provider: anthropic
+    model_id: TODO
+    key_ref: ANTHROPIC_API_KEY
+    context_limit: 0
+    supports_tools: true
+    tier: standard
+    fallback: idx-analyst-gpt
+
+  - name: idx-analyst-gpt
+    provider: openai
+    model_id: TODO
+    key_ref: OPENAI_API_KEY
+    context_limit: 0
+    supports_tools: true
+    tier: standard
+    fallback: null

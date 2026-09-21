@@ -1,0 +1,74 @@
+# One-VM deployment. See idx_agent_infrastructure_diagrams_md.md section 8.
+
+services:
+  proxy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - librechat
+
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    env_file: .env
+    depends_on:
+      - mongodb
+      - meilisearch
+      - agent-gateway
+
+  mongodb:
+    image: mongo
+    volumes:
+      - mongo_data:/data/db
+
+  meilisearch:
+    image: getmeili/meilisearch:latest
+    env_file: .env
+    volumes:
+      - meili_data:/meili_data
+
+  agent-gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    env_file: .env
+    depends_on:
+      - valkey
+      - postgres
+
+  ingest-worker:
+    build:
+      context: .
+      dockerfile: ingest/Dockerfile
+    env_file: .env
+    depends_on:
+      - valkey
+      - postgres
+
+  valkey:
+    image: valkey/valkey:latest
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - valkey_data:/data
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+
+volumes:
+  caddy_data:
+  mongo_data:
+  meili_data:
+  valkey_data:
+  postgres_data:

@@ -1,0 +1,19 @@
+# promptfoo eval suite. See idx_agent_infrastructure_diagrams_md.md section 13-14.
+# ~15 questions run across every model in models.yaml to catch tool-calling failures.
+
+providers:
+  - id: openai:chat:idx-analyst-claude
+    config:
+      apiBaseUrl: http://localhost:8000/v1
+  - id: openai:chat:idx-analyst-gpt
+    config:
+      apiBaseUrl: http://localhost:8000/v1
+
+prompts:
+  - "{{question}}"
+
+tests:
+  # TODO: ~15 questions covering screen_companies, get_company_report,
+  # get_price_history, get_market_movers
+  - vars:
+      question: "TODO"

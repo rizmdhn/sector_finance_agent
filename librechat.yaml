@@ -1,0 +1,16 @@
+# LibreChat config. See idx_agent_infrastructure_diagrams_md.md section 3.
+# LibreChat exits on startup if this file fails validation - validate before deploying.
+
+version: 1.1.4
+
+endpoints:
+  custom:
+    - name: "IDX Analyst"
+      apiKey: "${IDX_GATEWAY_KEY}"
+      baseURL: "http://agent-gateway:8000/v1"
+      models:
+        default:
+          - "idx-analyst-claude"
+          - "idx-analyst-gpt"
+        fetch: false
+      modelDisplayLabel: "IDX Analyst"

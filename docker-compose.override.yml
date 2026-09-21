@@ -1,0 +1,6 @@
+# Mounts librechat.yaml into the container. See idx_agent_infrastructure_diagrams_md.md section 3.
+
+services:
+  librechat:
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml
