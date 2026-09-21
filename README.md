@@ -1,4 +1,4 @@
-# sector_finance_agent
+# Sector's API-Based Finance Agent
 
 An IDX (Indonesia Stock Exchange) finance analyst agent: LibreChat (UI) → an
 OpenAI-compatible FastAPI gateway running a Strands Agent → hosted LLMs (Anthropic,
