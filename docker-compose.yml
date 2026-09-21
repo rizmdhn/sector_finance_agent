@@ -1,40 +1,15 @@
-# One-VM deployment. See idx_agent_infrastructure_diagrams_md.md section 8.
+# No chat UI is wired up yet — the agent-gateway's OpenAI-compatible API can be hit
+# directly (curl, Postman, scripts/manage.py) in the meantime. Leaning towards Open
+# WebUI over LibreChat (see librechat.yaml, kept around in case that changes); add its
+# service here once decided.
 
 services:
-  proxy:
-    image: caddy:2
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-    depends_on:
-      - librechat
-
-  librechat:
-    image: ghcr.io/danny-avila/librechat:latest
-    env_file: .env
-    depends_on:
-      - mongodb
-      - meilisearch
-      - agent-gateway
-
-  mongodb:
-    image: mongo
-    volumes:
-      - mongo_data:/data/db
-
-  meilisearch:
-    image: getmeili/meilisearch:latest
-    env_file: .env
-    volumes:
-      - meili_data:/meili_data
-
   agent-gateway:
     build:
       context: .
       dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
     env_file: .env
     depends_on:
       - valkey
@@ -67,8 +42,5 @@ services:
       - "6006:6006"
 
 volumes:
-  caddy_data:
-  mongo_data:
-  meili_data:
   valkey_data:
   postgres_data:

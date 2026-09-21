@@ -3,7 +3,16 @@
 Resume point if this session is lost. Source specs: `idx_agent_infrastructure_diagrams_md.md`
 (architecture) and `sectors_idx_ingest_cache_plan_md.md` (per-endpoint cache/ingest strategy)
 — the user holds these and will drop them into the repo; they are not committed here yet.
-Not a git repo yet — nothing has been committed.
+This is now a git repo (`github.com` remote `origin`, branch `main`) with commits — see
+`git log` for what's actually committed vs. still-untracked local changes.
+
+**UI decision is open.** The infra doc's original pick was LibreChat, but LibreChat +
+MongoDB + Meilisearch have been pulled out of `docker-compose.yml` — user is leaning
+towards Open WebUI instead. `librechat.yaml` is kept in case that changes.
+`docker-compose.override.yml` (which only existed to mount `librechat.yaml` into a
+`librechat` service) was deleted since it referenced a service that no longer exists.
+The gateway itself is UI-agnostic (plain OpenAI-compatible API), so this doesn't block
+anything else.
 
 ## Before running anything
 
@@ -23,7 +32,8 @@ Not a git repo yet — nothing has been committed.
 
 ### 1. Skeleton (repo layout, section 10 of the infra doc)
 All directories exist: `gateway/`, `data/`, `ingest/`, `evals/`, plus `docker-compose.yml`,
-`docker-compose.override.yml`, `librechat.yaml`, `models.yaml`, `.env.example`.
+`librechat.yaml` (unused for now — see UI decision note above), `models.yaml`,
+`.env.example`.
 
 ### 2. `data/` — fully implemented datasource layer
 - `config.py` — `Settings.from_env()`.
@@ -124,9 +134,10 @@ against real instances of either in this session, only against fakeredis/mocks.
 5. Never tested against a real Postgres/Valkey/Sectors API — only against fakeredis and
    mocked agents. No Docker daemon was available in this session to spin up the real
    compose stack.
-6. `librechat.yaml` / `docker-compose*.yml` haven't been exercised (no `docker compose up`
-   run yet).
-7. Nothing has been git-committed — this is not yet a git repo.
+6. `docker-compose.yml` hasn't been exercised (no `docker compose up` run yet). No chat
+   UI service is defined in it yet — pending the LibreChat vs Open WebUI decision.
+7. Confirm whether local changes made after the last commit (including anything from
+   this checkpoint) have actually been committed — check `git status` on resume.
 
 ## Suggested next step
 Either (a) wire up schema bootstrapping + bring up the full Compose stack for a real
