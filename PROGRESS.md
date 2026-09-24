@@ -1824,6 +1824,292 @@ documenting since it produced a confusing "I set it but it's still wrong"
 report — the actual value in use can always be checked directly:
 `docker exec sector_agents-agent-gateway-1 printenv ADMIN_PASSWORD`.
 
+## Item 35: Memory can now be edited, not just added/removed (2026-09-24)
+
+Straightforward addition: `PATCH /v1/memory/{id}` in `gateway/main.py`
+(`UpdateMemoryRequest{user, content}`), backed by `data/db.py`'s new
+`update_user_memory(user_id, memory_id, content) -> dict | None` — same
+`(id, user_id)` scoping as `delete_user_memory` so one user can't edit another's
+fact by guessing an id, verified live (update with the wrong `user` → 404).
+Content only: `metadata`'s `kind` tag and `created_at` are untouched by an edit —
+an edit corrects a fact, it doesn't re-date or reclassify it.
+
+Frontend: `src/api/memory.ts` gained `updateMemory`; `Memory.tsx` gained an
+inline edit mode per row (Edit → text input + Save/Cancel in place of the static
+content, matching the add form's own input styling) instead of a separate
+edit page or modal — the fact list is already the right place to edit one.
+
+Verified for real, same pattern as every other memory endpoint this session:
+add → PATCH → confirm the list shows only the updated content → PATCH with a
+different `user` than the one who owns it → 404 → cleanup. `tsc -b` + `vite
+build` + `oxlint` clean. Rebuilt and redeployed both `agent-gateway` and
+`admin-ui`, re-ran the same add/update/delete sequence through the live
+Docker path (`localhost:5173` → nginx → gateway → Postgres), not just against
+a locally-run gateway. Full Python suite: 72/72 still pass.
+
+## Item 36: Model tiering's standard/strong tiers now hold real Anthropic models
+(2026-09-24)
+
+User asked for real models behind item 28's tiers — Haiku for cheap (already
+real), Sonnet for standard, "Sonnet at max effort" for strong — and explicitly
+invited a recommendation on the strong-tier choice.
+
+**Recommendation given and implemented**: Opus 5 (`claude-opus-5`) for `strong`,
+not Sonnet 5 at max effort. `output_config.effort` only deepens thinking within
+one model; Opus is a genuinely more capable model — the actual fit for
+`ROLE_TIERS`' own "more capable models reserved for difficult conflicts"
+language, not "same model, think harder." ~2.5x Sonnet 5's per-token price
+($5/$25 vs $2/$10 per 1M), judged acceptable here specifically because `strong`
+is only reachable by `independent_risk_and_evidence_officer`, which the Chief
+already calls selectively (see its own module docstring), not on every question.
+Sonnet-at-max-effort remains a one-line fallback (`model_id` +
+`effort: max` on the same yaml entry) if the user wants it cheaper instead.
+
+**Changed**:
+- `gateway/registry.py`: `ModelEntry` gained `effort: str | None = None`.
+  `build_model()` now passes `params={"output_config": {"effort": entry.effort}}`
+  to `AnthropicModel` when set — confirmed via `strands.models.anthropic
+  .AnthropicModel`'s own docstring that `params` passes straight through to the
+  real Messages API request body, not a Strands-specific concept. Left `None`
+  (param omitted entirely) for Haiku 4.5, which errors if `effort` is present at
+  all — confirmed via the claude-api skill's model/effort tables, not assumed.
+- `models.yaml`: two new real entries — `idx-analyst-claude-sonnet`
+  (`claude-sonnet-5`, tier `standard`, no effort override — the model's own
+  default applies) and `idx-analyst-claude-opus` (`claude-opus-5`, tier `strong`,
+  `effort: max`). The old `idx-analyst-claude-strong` placeholder is now this
+  real Opus entry (renamed to match); `idx-analyst-gpt`'s `standard`-tier
+  placeholder stays untouched and un-competing (`select_for_tier` skips it on its
+  still-TODO `model_id` regardless of order).
+
+Verified for real, not just constructed: `load_registry()` + `select_for_tier`
+resolve `cheap`/`standard`/`strong` to Haiku/Sonnet/Opus exactly as intended;
+`build_model()` on the Opus entry produces the right `params` dict and omits it
+entirely for Haiku; then three live API calls, smallest first — raw `anthropic`
+SDK call to Sonnet 5 with `output_config: {"effort": "high"}` (real 200 response,
+"OK"), the same to Opus 5 with `effort: "max"` (real 200 response), then the
+actual code path this project uses end-to-end
+(`build_model()` -> Strands `AnthropicModel.stream()`) against Opus 5 — all three
+succeeded, all three kept to `max_tokens` 16-32 to hold cost to a few tokens.
+Full Python suite: 72/72 still pass.
+
+**Not done, and asked the user directly rather than assumed**: no role's
+`ROLE_TIERS` entry was changed — every role still defaults to `cheap` (Haiku).
+The tiers are real and working now, but whether to actually route any role
+(most naturally `independent_risk_and_evidence_officer`, onto `strong`) through
+paid Sonnet/Opus calls on every relevant question is a recurring-cost decision,
+not a one-time wiring cost like the verification calls above — asked the user
+which role(s), if any, to flip, rather than deciding it myself.
+
+## Item 37: Model Tiering is now real — admin-ui changes actually control which
+model each role runs on (2026-09-24)
+
+User caught the gap directly: the Model Tiering panel's "falls back to..."
+badge mirrored real logic, but the panel itself was still item 29's mock —
+changing a tier in the UI only touched `localStorage`, never
+`gateway/roles/orchestrator.py`'s `ROLE_TIERS`. Asked to build the real thing.
+
+**Made role tiers live-editable, not just resolvable**: `ROLE_TIERS` (a hardcoded
+dict) became `DEFAULT_ROLE_TIERS` (the fallback) plus `resolve_role_tiers(db)`,
+which merges in overrides from a new Postgres table
+(`role_tier_config`, `data/schema.sql`) — read fresh on every `build_agent()`
+call, so a change takes effect on the very next request, no redeploy, no cache
+to go stale. `data/db.py` gained `get_role_tiers()`/`set_role_tier()` (a plain
+upsert). Chose Postgres over Valkey deliberately: Valkey runs with
+`allkeys-lru` (correct for a cache, see data/memory_store.py's own docstring on
+this exact tradeoff) — this is standing configuration, not something that
+should ever get silently evicted under memory pressure.
+
+**Real endpoints** (`gateway/main.py`): `GET /v1/admin/model-tiers` returns
+`{config, models}` — `config` from `resolve_role_tiers`, `models` built live
+from `_registry` (name/provider/tier/usable) instead of a UI-side hand-copied
+list that could drift from `models.yaml`. `PATCH /v1/admin/model-tiers/{role}`
+validates the role is one of the five real ones and the tier is one of
+`cheap`/`standard`/`strong` (404/400 respectively otherwise), then upserts.
+Both behind the same `_check_auth` bearer dependency as every other endpoint.
+
+**Frontend**: `src/api/modelTiers.ts`'s mock (`localStorage`, hand-copied
+`MODELS`) is gone — `getModelTiering()`/`updateRoleTier()` now call the real
+endpoints. `ROLES` (display labels/descriptions) stays static frontend data on
+purpose — the backend only knows role ids, no reason to move display copy
+server-side for a 5-item list. `resolveModelForTier` took `models` as a
+parameter instead of closing over a module-level constant, since `models` is
+now dynamic (fetched, not hardcoded).
+
+**Verified for real, in escalating layers, not assumed at any point**: `data/
+db.py`'s new methods directly against local Postgres (set → get → revert);
+`db.init_schema()` re-run live (safe — every `CREATE TABLE` in schema.sql uses
+`IF NOT EXISTS`, confirmed by counting them, 12/12) to add the new table without
+touching the 11 existing ones; the two HTTP endpoints directly (GET, PATCH an
+unknown role → 404, PATCH an invalid tier → 400); **the actual point of this
+feature** — PATCHed `independent_risk_and_evidence_officer` to `strong` via the
+real HTTP endpoint, then called `build_agent()` inside the running
+`agent-gateway` container and inspected the built IRO sub-agent's live
+`model.get_config()`: `claude-opus-5`, while every other role's model stayed
+`claude-haiku-4-5-20251001` — confirmed the PATCH actually changes runtime
+behavior, not just a stored value nothing reads. Reverted the test change.
+Then the full browser-shaped path through nginx (GET → PATCH → GET-confirms-it
+→ revert), not just against the gateway directly. `tsc -b` + `vite build` +
+`oxlint` clean. Full Python suite: 72/72 still pass.
+
+**Not done**: still no browser-automation tool, so the Model Tiering page's
+actual rendering (segmented control click → save-state badge → resolved-model
+badge update) is unverified visually — every check above exercised the real
+HTTP/DB/build_agent() behavior underneath it, not what it looks like on screen.
+
+## Item 38: Model Tiering became per-user, not system-wide (2026-09-24)
+
+User's ask, prompted by a question about where Postgres holds "user config":
+each user should be able to pick their own model tiering, not one shared
+system-wide config. Real architecture change, not a UI tweak — `role_tier_config`
+was keyed by `role_id` alone (one row per role, for everyone); it needed a
+`user_id` too, the same scoping `user_memory` already uses.
+
+**Schema**: `role_tier_config` now `PRIMARY KEY (user_id, role_id)`. Since
+`CREATE TABLE IF NOT EXISTS` doesn't alter an existing table, and this
+session's table only held two harmless test rows (both already matching the
+default "cheap", added during item 37's verification), dropped and recreated
+it directly rather than writing a throwaway migration for zero real data.
+
+**Backend**: `data/db.py`'s `get_role_tiers`/`set_role_tier` both gained a
+`user_id` parameter (filtered `WHERE`, added to the upsert's conflict target).
+`gateway/roles/orchestrator.py`'s `resolve_role_tiers(db, user_id)` now scopes
+the Postgres lookup to that user; `build_agent()` already receives `user_id`
+for memory scoping, so wiring it into tiering too was a one-line change at the
+call site. `gateway/main.py`: `GET /v1/admin/model-tiers` now takes a `user`
+query param (matching `/v1/memory`'s existing pattern exactly), `PATCH
+.../model-tiers/{role}` takes `user` in its body alongside `tier`.
+
+**Frontend**: `modelTiers.ts`'s `getModelTiering`/`updateRoleTier` take
+`userId`; `ModelTiering.tsx` takes a `userId` prop (re-fetches on change, same
+pattern as `Memory.tsx`/`Chat.tsx`) instead of loading once for everyone;
+`App.tsx` passes the same shared `userId` state it already threads through to
+the other two tabs. Header copy now says whose tiering is being edited.
+
+Verified for real, escalating the same way as item 37: `data/db.py` directly
+against Postgres — set alice's IRO to `strong`, bob's chief to `standard`,
+confirmed carol (nobody set anything) gets `{}` back, i.e. all defaults;
+`build_agent()` inside the running container for two different `user_id`s with
+the same role tiered differently — alice's IRO built on `claude-opus-5`, bob's
+on `claude-haiku-4-5-20251001`, same code, same role, genuinely different
+models; then the actual browser, via Playwright MCP (see below) — set carol's
+IRO to `strong` by clicking the real UI, switched the User field to `bob`, and
+the page correctly showed bob's IRO still on `cheap` — real per-user isolation,
+not just simulated. `tsc -b` + `vite build` + `oxlint` clean. Full Python
+suite: 72/72 still pass.
+
+**Also this round — Playwright MCP finally connected and did real visual
+verification for the first time this session** (the browser tool gap flagged
+in items 29/31/37 is now closed). Confirmed by actually clicking through, not
+just inferring from HTTP/DB behavior: the login screen (empty + wrong-password
+error state, which correctly cleared the field), Model Tiering's redesigned
+card grid + segmented control + save-state + resolved-model badge (both
+before and after this item's per-user change), Memory's add/edit/delete cycle
+end-to-end in the UI, and Chat's mock session list. One real process note: a
+browser tab that already had the SPA loaded does NOT pick up a new
+`admin-ui` build just by clicking around — Vite's hashed bundle filenames mean
+a stale tab keeps running the old JS until an actual page reload; hit this
+directly as a false-looking 422 (old bundle calling the tiering endpoint
+without the new `user` param) before recognizing it as a stale-tab artifact,
+not a bug in the new code.
+
+## Item 39: Chat connected to the real gateway — the last mock in admin-ui is gone
+(2026-09-24)
+
+User's ask: wire Chat to the real `/v1/chat/completions`, the thing explicitly
+deferred back in item 29 ("mock first"). `src/api/chat.ts` rewritten — sessions
+themselves stay a local index (`localStorage`; there's no "list my sessions"
+endpoint on the gateway), but `sendMessage` now does a real POST. Each local
+session's own `id` doubles as the `X-Session-Id` header — `gateway/main.py`
+already treats an unrecognized id as new (seeds full history) and a known one as
+continuing (trims server-side to just the newest turn), so the client never
+branches on new-vs-continuing, it just always sends its full local transcript
+plus the same id every time. `Chat.tsx` gained real error handling (a 429 shows
+"rate limited", anything else "could not reach the gateway") — the mock never
+needed this, since it never failed.
+
+Verified escalating by cost, cheapest first: a raw curl through the full
+`nginx -> gateway -> Chief` path with a 4-word question, confirmed the real
+disclaimer came back attached; a second curl reusing the same `X-Session-Id`
+with a follow-up question ("what did you just say?") — the model correctly
+answered "OK", proving real Valkey-backed session continuity, not just a
+successful call; then the actual browser via Playwright — a brand new session,
+sent "Reply with exactly one word: OK" through the real UI, watched the real
+reply render, sent a follow-up in the same session, watched it correctly
+remember its own prior turn. `tsc -b` + `vite build` + `oxlint` clean. Full
+Python suite: 72/72 (frontend-only change).
+
+**Found a real, small bug while doing this**: the disclaimer text
+(`gateway/guardrails.py`'s `NOT_FINANCIAL_ADVICE_NOTICE`) uses markdown italics
+(`_..._`), but the chat bubble renders it as plain text — every real reply now
+shows literal underscores instead of italics. Not fixed yet (mock replies never
+exercised this, so it was invisible until real text started flowing through).
+Flagged for the user rather than silently reaching for a markdown library
+un-asked.
+
+## Item 40: Chat gained real step-tracing + live-streamed replies (2026-09-24)
+
+Two user asks in sequence: first, that sending a message gave no feedback (a
+real bug — the user's own message didn't render until the whole round trip
+finished, since React state only updated after `sendMessage` resolved), then,
+once dots were added, "make it like step tracing" — show which specialist the
+Chief is actually consulting while waiting, not just an opaque spinner.
+
+Step-tracing needs real intermediate signal, which a non-streaming request
+can't give (one blob, at the end, or nothing) — so this meant actually turning
+on `stream: true`, not just UI polish. Checked live before writing any code
+whether Strands even exposes this: ran a real question through
+`agent.stream_async()` directly and found `event["current_tool_use"]["name"]`
+identifies which top-level tool the Chief is mid-call on — for this agent,
+always one of the 4 specialists or `search_memory`/`add_memory`, since those
+are its only tools.
+
+**Backend** (`gateway/main.py`'s `_stream_response`): now yields a `step` field
+in the SSE delta (alongside the existing OpenAI-standard `content` field)
+whenever `current_tool_use.name` changes — deduped, not on every repeated delta
+of the same in-progress call. Deliberately stops at the top level: a
+specialist's OWN internal tool calls (e.g. investment_research_lead calling
+analyze_fundamentals) arrive nested inside a `tool_stream_event` wrapper and
+aren't unpacked — which specialist is being consulted is the meaningful signal
+to show a user, not which of Sectors' own endpoints it happens to hit.
+Non-standard field on an OpenAI-shape chunk; LibreChat or any other
+OpenAI-compatible client just won't recognize `delta.step` and ignores it.
+
+**Frontend**: `src/api/chat.ts`'s `sendMessage` rewritten to POST with
+`stream: true` and read the response body as a real SSE stream (manual
+`getReader()`/`TextDecoder`, not `EventSource` — needs a custom header and a
+POST body, which `EventSource` can't do), taking two optional callbacks:
+`onStep` and `onDelta` (the latter fires with the accumulating text on every
+content chunk — nearly free once the stream reader loop already exists, and
+directly answers the original "I don't know if something's happening"
+complaint better than steps alone: the reply now visibly types in). `Chat.tsx`
+renders three states while `sending`: no step yet (bouncing dots), a step known
+but no text yet (pulsing "Consulting Investment Research Lead…", label text
+reused from `modelTiers.ts`'s `ROLES` so it can't drift from the real role
+names), or text arriving (renders live in an assistant bubble in place of the
+indicator). Also fixed the earlier "message doesn't appear until the reply
+does" bug properly in this same pass: an optimistic local update shows the
+user's bubble the instant Send is clicked, not after the network round trip.
+
+Verified for real, escalating: a raw `agent.stream_async()` call inspected
+directly to confirm `current_tool_use` exists before designing anything around
+it; a raw streaming curl through the full `nginx -> gateway` path showing the
+real `step` chunk arriving ~7 seconds before any content, then real content
+chunks after; then the actual browser via Playwright — sent a real question,
+screenshotted mid-flight and caught "Consulting Investment Research Lead…"
+rendering live, confirmed the final answer (a real, detailed, correctly-cited
+dividend-yield analysis) rendered correctly after. Found and fixed a real CSS
+bug in the same pass — the step label was wrapping one word per line in a
+tiny box; `white-space: nowrap` fixed it (a `width: max-content` attempt first
+didn't fully resolve it, replaced). `tsc -b` + `vite build` + `oxlint` clean.
+Full Python suite: 72/72 (backend change was additive to an existing function,
+no test file covers `gateway/main.py` directly).
+
+**Not done**: nested specialist-level tool steps (e.g. "Investment Research
+Lead is running analyze_fundamentals") stay invisible, a deliberate scope
+stop, not an oversight — see above. The markdown-italics rendering gap found
+in item 39 is still open (mentioned again since it's now more visible with
+live-streaming text).
+
 ## Not started / open
 
 1. ~~`db.init_schema()` is never called anywhere~~ — done for real: 11 tables exist in

@@ -1,0 +1,13 @@
+-- Runs automatically only on a FRESH postgres data volume (the official image's
+-- docker-entrypoint-initdb.d convention: scripts here run once, the first time
+-- the data directory is empty — never again after that). Creates a separate
+-- database for Arize Phoenix's own tables (traces, spans, annotations, ...) so
+-- they live in their own namespace, not mixed into this project's `idx_agent`
+-- database/schema. Phoenix connects to it via PHOENIX_SQL_DATABASE_URL in
+-- docker-compose.yml and runs its own migrations against it on startup — this
+-- script only needs to create the empty database, nothing more.
+--
+-- For a postgres volume that already existed before this file did, this never
+-- runs — the database has to be created once by hand instead (see PROGRESS.md
+-- item 33 for the exact command used).
+CREATE DATABASE phoenix;
