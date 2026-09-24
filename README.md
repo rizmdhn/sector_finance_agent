@@ -119,11 +119,110 @@ python scripts/manage.py analyze-liquidity BBCA 50000000000
 python scripts/manage.py analyze-returns BBCA 1m
 ```
 
-Also exposed as agent tools (`gateway/tools/portfolio_analysis.py`). Not yet wired:
-`analysis/fundamentals.py` and the raw-component parts of `analysis/valuation.py`
-(P/E from earnings, FCFF/FCFE, bank ratios) — these need the company report's
-`financials` section, which has not been fetched for any symbol yet since it costs a
-Sectors credit per section; see `portfolio-intelligence-data-gap-analysis-v1.md` (G4).
+`data/analysis_bridge.py::fundamentals_snapshot` additionally wires
+`analysis/fundamentals.py` and the raw-component side of `analysis/valuation.py`
+(P/E, P/B, EV/EBITDA, FCFF/FCFE, bank ratios) to the company report's `financials`
+section:
+
+```
+python scripts/manage.py analyze-fundamentals BBCA
+```
+
+This is CACHE-strategy (like `get-report`): 1 credit per report section on the first
+call for a symbol, free on every call after that until the symbol's data changes.
+Several bank-specific field mappings (loan-to-deposit's numerator, NIM's denominator)
+were chosen by cross-checking against Sectors' own precomputed
+`historical_financial_ratio` values for BBCA — see `_provenance` in the function's
+output and its docstring. FCFF/FCFE come back `Unavailable` for a bank like BBCA
+because Sectors has no change-in-operating-working-capital field, which is the
+correct behavior per Appendix A, not a bug. All three `analyze-*` price/portfolio
+commands above and this one are exposed as agent tools
+(`gateway/tools/portfolio_analysis.py`).
+
+## Credit cost per ticker (cost management)
+
+Sectors bills per API call, roughly 1 credit per report *section* requested (not per
+call) — confirmed against a real usage log, not estimated:
+
+| Action | Endpoint | Cost when NOT cached | Cost once cached |
+|---|---|---|---|
+| `get-report <symbol> overview` | `company/report/{symbol}` | 1 credit | 0, until `price_epoch` bumps (next trading day's close lands) |
+| `get-report <symbol> valuation` | same, `valuation` section | 1 credit | 0, same as overview |
+| `analyze-fundamentals <symbol>` | `overview` + `financials` sections | **2 credits** | 0, until the symbol's cached version bumps |
+| `get-report <symbol>` with any of `future`/`peers`/`dividend`/`management`/`ownership` | same endpoint, that section | 1 credit each | 0, same as financials |
+| `backfill-price <symbol>` | `daily/{symbol}/` | 1 credit | N/A — written to Postgres permanently; re-run only to refresh |
+| `screen "<where>"` | `companies/` | 1 credit per distinct canonical query | 0 for an identical repeat query, until the epoch/TTL for its field class expires |
+| `run-job universe_close` (whole-market daily close) | `close/`, paginated | ~33 credits (962 symbols ÷ 30/page) | shared across every symbol and every user — this is the one call that amortizes, run once/day regardless of how many tickers are analyzed |
+| `analyze-portfolio` / `analyze-liquidity` / `analyze-returns` | (Postgres only) | **0** | **0** — never calls the Sectors API; needs `backfill-price` done at least once for volume-dependent liquidity numbers |
+
+**Bringing one brand-new ticker fully online** (price history + report + the whole
+calculation engine wired) costs **3 credits, once**: `backfill-price` (1) +
+`get-report overview` (1) + `analyze-fundamentals`'s `financials` pull (1) — add +1 if
+`valuation` is also wanted for Sectors' own precomputed multiples. Every analysis run
+on that ticker after that first pull is free until the underlying data actually
+changes (a new trading day's close, or a new filing).
+
+### Where more caching would help
+
+- **`ingest/jobs/quarterly_dates.py` is unimplemented** (see PROGRESS.md) — the
+  version bump that should invalidate `financials`/`dividend`/`management`/`ownership`
+  caches when a new quarterly report lands never fires today. This is actually
+  *good* for cost (those sections stay free forever once fetched) but risks serving
+  silently stale fundamentals after a real earnings release. Worth fixing before
+  relying on this for anything beyond a demo.
+- **Valkey has no persistent backstop.** Every CACHE-strategy payload (company report
+  sections, screener results) lives only in Valkey; a cache flush or container
+  restart without a volume would force every one of those 1-credit-per-section calls
+  to be paid again. Mirroring them into a Postgres JSONB table as a durable fallback
+  (checked before falling back to a live call) would make the credit spend durable
+  across restarts, not just within a single Valkey uptime window.
+- **`free_float/` is not wired to anything yet** — `SectorsClient.get_free_float()`
+  exists but no ingest job or repository function calls it, so
+  `analysis/liquidity.py::free_float_capacity` has no real data source today. It's a
+  REFERENCE-strategy list (whole-market, refreshed weekly), so it would cost a
+  small, flat, amortized number of credits regardless of ticker count if ingested.
+- **Onboard tickers in batches, not one call per analysis.** Because `backfill-price`
+  + `overview` + `financials` are three separate credit-costed calls, adding N new
+  tickers to a portfolio one at a time across a chat session pays 3N credits spread
+  out; doing it as one deliberate priming pass (e.g. before a session starts) is the
+  same total cost but avoids surprise per-message spend during analysis.
+
+## Agent architecture
+
+`gateway/agent.py::build_agent` now builds the **Chief Portfolio Intelligence
+Orchestrator** (`gateway/roles/orchestrator.py`), the first piece of the 5-role
+architecture in `portfolio-intelligence-business-requirements-v1.1.md` section 4 —
+replacing the earlier flat single-agent MVP. Only 2 of the 5 roles exist so far:
+
+- **Chief Portfolio Intelligence Orchestrator** — no tools of its own; delegates to
+  specialists and synthesizes their answers.
+- **Investment Research Lead** (`gateway/roles/investment_research.py`) — wired to
+  the Chief as an agent-as-tool (Strands' `Agent.as_tool()`), with
+  `get_company_report`, `get_price_history`, `analyze_fundamentals`, and
+  `screen_companies`. Covers company economics, financial quality, and valuation;
+  ownership/governance and thesis monitoring are named in its system prompt as not
+  backed by real tools yet, so it says so rather than fabricating an answer.
+
+**Not implemented yet: Portfolio Risk Lead, Market and Event Intelligence Lead,
+Independent Risk and Evidence Officer.** The Chief's system prompt explicitly tells
+it to say so whenever a question would need one of them, rather than presenting an
+answer as portfolio-risk-checked or independently reviewed when neither has
+happened. One concrete consequence: `analyze_portfolio`/`analyze_liquidity`/
+`analyze_returns` (Portfolio Risk Lead's territory per the doc's role table) are
+**not** attached to the Chief — they're still exposed as CLI commands and as
+importable tools in `gateway/tools/portfolio_analysis.py`, ready for a Portfolio Risk
+Lead agent to pick up, but nothing in the live agent graph calls them right now.
+
+Both roles currently share whatever model is selected via `/v1/models` — per-role
+model tiering (business doc section 8: cheaper models for routine coordination,
+stronger ones for disputed conflicts) is not implemented.
+
+**Not yet tested against a live LLM** — no `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` is
+set and `models.yaml` still has `model_id: TODO` for both entries. Verified so far:
+both agents construct correctly and wire their tools/sub-agent as expected (a dry
+run with a placeholder key and model id, no live network call) and the existing
+`analysis`/`data` test suite (60 tests) still passes. Add a real key and a real
+`model_id` to actually run a conversation.
 
 ## Running the stack
 

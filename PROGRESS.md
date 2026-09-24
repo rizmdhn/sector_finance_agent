@@ -310,6 +310,91 @@ below reads only already-ingested Postgres data or already-cached Valkey data.
   output sanity-checked (e.g. `analyze-returns BBCA 1m` correctly reports 21 sessions
   and a max drawdown of ≈ -8.5%, matching the actual ingested price swing).
 
+## Item 9: fundamentals/valuation wired to real data — 1 credit spent (2026-09-24)
+
+Per the user's explicit go-ahead to spend credit here as long as it's efficient: spent
+exactly **1 credit** (one `company/report/BBCA/` call for the `financials` section —
+`overview` was already cached from item 7) to wire the previously-deferred half of the
+calculation engine.
+
+- **`data/analysis_bridge.py::fundamentals_snapshot`** (new): general fundamentals
+  (revenue growth, margins, ROA/ROE, net debt/EBITDA, interest coverage, CFO margin,
+  cash conversion) from `historical_financials`' latest fiscal year (and prior year,
+  for the two ratios needing an average); bank-specific ratios (NIM, gross NPL ratio,
+  loan-loss coverage, loan-to-deposit, cost-to-income, capital adequacy) when
+  loan/deposit/NII fields are present; raw-component valuation (P/E, P/B, EV/EBITDA,
+  FCFF, FCFE).
+- **Validated three field-mapping choices against Sectors' own precomputed
+  `historical_financial_ratio`** for BBCA FY2025 (a free cross-check — that section
+  was already in the same cached payload): capital adequacy matched immediately
+  (tier1+tier2 / RWA). Loan-to-deposit and NIM did **not** match on the first,
+  more-obvious field choice (`gross_loan` and `gross_loan + non_loan_earning_assets`
+  respectively) — corrected to `net_loan` and `non_loan_earning_assets` alone, which
+  then matched Sectors' reported ratios to 6+ decimal places. `non_performing_loans`
+  has no named field at all; parsed from a human-readable label inside
+  `industry_breakdown.loan_at_risk`, confirmed only for BBCA — flagged in
+  `_provenance` as needing verification before trusting for other banks.
+- FCFF/FCFE correctly return `Unavailable` for BBCA — there is no
+  change-in-operating-working-capital field anywhere in `historical_financials` — this
+  is the calculation engine behaving exactly as designed (Appendix A: never
+  approximate a missing input), not a defect.
+- New CLI command `analyze-fundamentals`, new gateway tool `analyze_fundamentals`,
+  both added alongside item 8's tools.
+- New test `test_fundamentals_snapshot_matches_sectors_reported_ratios` in
+  `data/tests/test_analysis_bridge.py` — asserts the computed bank ratios against
+  Sectors' own reported values (exact match) and that FCFF/FCFE are `Unavailable`.
+  Skips cleanly (no live call) if BBCA's `financials` section isn't cached. 60/60
+  tests pass.
+- Updated `portfolio-intelligence-data-gap-analysis-v1.md`'s G4 "status of the wiring
+  itself" note and `README.md` to reflect this.
+
+**Not wired for any symbol other than BBCA** — the field-mapping corrections above
+were validated against one bank; a non-bank issuer's `historical_financials` shape
+(and possibly a different subset of populated fields) hasn't been checked, and a
+second bank hasn't been used to confirm the NIM/loan-to-deposit mappings generalize
+beyond BBCA specifically.
+
+## Item 10: multi-agent architecture started — Chief + Investment Research Lead (2026-09-24)
+
+User picked "Orchestrator + Investment Research Lead first" over building all 5 roles
+at once or stubbing all of them — a working vertical slice that can be tested
+end-to-end as soon as a model key exists, rather than a fully-built but unverified
+5-role graph.
+
+- Installed `strands-agents` (and the rest of `gateway/requirements.txt`) into
+  `.venv` — wasn't installed before this point in the session.
+- **`gateway/roles/investment_research.py`** (new): builds the Investment Research
+  Lead as its own `Agent`, tools = `get_company_report`, `get_price_history`,
+  `analyze_fundamentals`, `screen_companies`. System prompt covers 3 of its 4
+  business-doc functions (fundamentals, valuation, and — honestly — the absence of
+  ownership/governance and thesis-monitoring tooling) and states its boundary: does
+  not decide portfolio allocation.
+- **`gateway/roles/orchestrator.py`** (new): builds the Chief with no tools of its
+  own except the Investment Research Lead wired in via Strands' built-in
+  `Agent.as_tool()` (`strands/agent/_agent_as_tool.py` — didn't need to hand-roll
+  this). System prompt explicitly lists Portfolio Risk Lead, Market and Event
+  Intelligence Lead, and the Independent Risk and Evidence Officer as **not yet
+  available**, instructing the model to say so rather than imply a portfolio-risk
+  check or independent review happened — same anti-fabrication principle the data
+  layer already follows, applied to missing roles instead of missing fields.
+- **Deliberate capability regression, documented**: the flat MVP agent this replaces
+  had direct access to `analyze_portfolio`/`analyze_liquidity`/`analyze_returns`.
+  Those are Portfolio Risk Lead's territory per the role table, so the Chief does not
+  get them directly — they're still exposed as CLI commands and importable tools,
+  just not attached to the live agent graph until that role exists.
+- **`gateway/agent.py`** rewritten to a 12-line re-export of
+  `gateway.roles.orchestrator.build_agent` — `gateway/main.py` needed zero changes
+  (same import, same signature).
+- Both roles currently share one model (whatever `/v1/models` selects) — per-role
+  model tiering (section 8's "modest reasoning for routine coordination, stronger
+  models for disputed conflicts") is not implemented.
+- **Verified structurally, not live**: both agents construct without error and wire
+  their tools/sub-agent as expected, using a placeholder API key and model id (no
+  network call happens at construction time). Could not verify an actual
+  conversation — no `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` is set, and `models.yaml`
+  still has `model_id: TODO` for both registry entries. All 60 `data`/`analysis`
+  tests still pass unaffected.
+
 ## Not started / open
 
 1. ~~`db.init_schema()` is never called anywhere~~ — done for real: 11 tables exist in
@@ -339,24 +424,33 @@ below reads only already-ingested Postgres data or already-cached Valkey data.
    confirmed to actually filter by date/symbol as intended.
 9. ~~`portfolio-intelligence-data-gap-analysis-v1.md` needs an update pass~~ — done,
    item 8.
-10. `analysis/fundamentals.py` and the raw-component half of `analysis/valuation.py`
-    are still unwired to real data — needs a deliberate, budgeted pull of the company
-    report's `financials` section (costs a credit; not fetched speculatively this
-    session — see item 8 and gap analysis G4).
-11. The 5-role agent architecture (Chief Orchestrator, Investment Research Lead,
-    Portfolio Risk Lead, Market/Event Intelligence Lead, Independent Risk and Evidence
-    Officer) and Appendix B's review workflow/materiality scoring have not been
-    started — `gateway/agent.py` is still the single MVP agent, now with the
-    portfolio/liquidity/returns tools from item 8 added to its toolset.
+10. ~~`analysis/fundamentals.py` and the raw-component half of `analysis/valuation.py`
+    are still unwired to real data~~ — done, item 9 (1 credit spent, BBCA only; field
+    mappings not yet confirmed to generalize to other symbols/sectors).
+11. ~~The 5-role agent architecture... has not been started~~ — 2 of 5 roles built,
+    item 10 (Chief + Investment Research Lead). Still missing: Portfolio Risk Lead
+    (would pick up the orphaned `analyze_portfolio`/`analyze_liquidity`/
+    `analyze_returns` tools from item 8), Market and Event Intelligence Lead
+    (needs the news/corporate-actions/foreign-flow/broker endpoints — none of them
+    wired to a repository function or ingest job yet, only present in
+    `sectors_client.py`), and the Independent Risk and Evidence Officer with
+    Appendix B's review-decision workflow and materiality scoring (PASS / PASS WITH
+    LIMITATIONS / REVISE / DATA BLOCKED / HUMAN ESCALATION) — this last one is
+    architecturally different from the other two: it needs to review the *Chief's*
+    output, not be called as an ordinary delegated sub-agent, so it likely doesn't
+    fit the same `Agent.as_tool()` pattern used for Investment Research Lead.
+12. No real LLM has been used against this codebase at all this session —
+    `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are both unset and `models.yaml` still has
+    `model_id: TODO` for both entries. Everything in item 10 is verified structurally
+    (agents construct, tools wire up correctly) but not behaviorally.
 
 ## Suggested next step
-The user picked "calculation engine first" (done, item 6), then "start wiring real
-data" (done for the data layer, item 7; done for `analysis/`'s portfolio/returns/
-liquidity functions against real ingested prices, item 8 — all with zero net-new
-Sectors credits spent). What's left before the calculation engine is fully wired is a
-deliberate, budgeted pull of one symbol's `financials` report section to wire
-`analysis/fundamentals.py` and valuation's raw-component functions (item 10) — small
-and cheap, but a real credit cost the user should approve first given their stated
-budget concern. Beyond that, the natural next step is starting the 5-role agent
-architecture (item 11) rather than the single MVP agent — confirm with the user which
-they'd rather do next.
+The user picked "calculation engine first" (6), "start wiring real data" (7-9), then
+"start building the agent" (10, Chief + Investment Research Lead). The most useful
+next step is getting a real model key and `model_id` in so item 10 can actually be
+run and observed for the first time — everything about it is currently verified only
+structurally. After that, either continue the 5-role build (Portfolio Risk Lead is
+the natural next role — its tools already exist from item 8, just unattached) or
+spend a little more credit validating item 9's fundamentals field mappings against a
+second bank/non-bank issuer before trusting them generally. Worth confirming with the
+user which they'd rather do next.

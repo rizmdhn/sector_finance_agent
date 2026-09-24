@@ -14,9 +14,13 @@ Usage (run from the repo root, with .env variables exported into the shell):
     python scripts/manage.py analyze-portfolio "BBCA=1000,BMRI=500" --cash=10000000
     python scripts/manage.py analyze-liquidity BBCA 50000000000
     python scripts/manage.py analyze-returns BBCA 1m
+    python scripts/manage.py analyze-fundamentals BBCA
 
-The analyze-* commands read only from Postgres (data/analysis_bridge.py) — they never
-call the Sectors API, so they cost zero credits regardless of how often they're run.
+analyze-portfolio/liquidity/returns read only from Postgres (data/analysis_bridge.py)
+— they never call the Sectors API, so they cost zero credits regardless of how often
+they're run. analyze-fundamentals fetches the company report's overview+financials
+sections (CACHE strategy): 1 credit per section on the first call for a given symbol,
+free on every call after that until the symbol's data changes.
 """
 
 import argparse
@@ -88,6 +92,11 @@ def cmd_analyze_returns(args) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+def cmd_analyze_fundamentals(args) -> None:
+    result = analysis_bridge.fundamentals_snapshot(get_cache(), get_db(), get_client(), args.symbol)
+    print(json.dumps(result, indent=2, default=str))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -146,6 +155,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("symbol")
     p.add_argument("period", choices=["1m", "3m", "1y"])
     p.set_defaults(func=cmd_analyze_returns)
+
+    p = sub.add_parser(
+        "analyze-fundamentals",
+        help="Fundamentals/valuation from the company report's financials section "
+        "(analysis/fundamentals.py + analysis/valuation.py; CACHE strategy, "
+        "1 credit per section on first call per symbol, free after that)",
+    )
+    p.add_argument("symbol")
+    p.set_defaults(func=cmd_analyze_fundamentals)
 
     return parser
 

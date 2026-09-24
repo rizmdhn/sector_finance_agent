@@ -1,7 +1,11 @@
-"""Portfolio/liquidity/returns tools backed by analysis/ + data/analysis_bridge.py.
+"""Portfolio/liquidity/returns/fundamentals tools backed by analysis/ +
+data/analysis_bridge.py.
 
-These read only already-ingested Postgres data (never call SectorsClient), so they
-cost zero Sectors API credits — see data/analysis_bridge.py's module docstring.
+analyze_portfolio/analyze_liquidity/analyze_returns read only already-ingested
+Postgres data (never call SectorsClient) — zero Sectors API credits. analyze_
+fundamentals fetches the company report's financials section (CACHE strategy): 1
+credit per section on the first call for a symbol, free after that. See
+data/analysis_bridge.py's module docstring.
 """
 
 from typing import Literal
@@ -9,7 +13,7 @@ from typing import Literal
 from strands import tool
 
 from data import analysis_bridge
-from data.deps import get_db
+from data.deps import get_cache, get_client, get_db
 
 Period = Literal["1m", "3m", "1y"]
 
@@ -50,3 +54,15 @@ def analyze_returns(symbol: str, period: Period) -> dict:
         period: Preset lookback window.
     """
     return analysis_bridge.returns_snapshot(get_db(), symbol, period)
+
+
+@tool
+def analyze_fundamentals(symbol: str) -> dict:
+    """Calculate fundamental ratios (margins, ROA/ROE, leverage, bank-specific
+    ratios when applicable) and raw-component valuation (P/E, P/B, EV/EBITDA,
+    FCFF/FCFE) for an IDX-listed company from its latest reported fiscal year.
+
+    Args:
+        symbol: IDX ticker, e.g. "BBCA".
+    """
+    return analysis_bridge.fundamentals_snapshot(get_cache(), get_db(), get_client(), symbol)
