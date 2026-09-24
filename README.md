@@ -4,11 +4,15 @@ An IDX (Indonesia Stock Exchange) finance analyst agent: a chat UI → an
 OpenAI-compatible FastAPI gateway running a Strands Agent → hosted LLMs (Anthropic,
 OpenAI) → a data layer (Valkey cache + Postgres) → the Sectors API.
 
-**UI is not decided yet.** The infra doc's original pick was LibreChat, but that's been
-pulled out of `docker-compose.yml` — leaning towards Open WebUI instead. Either way, the
-gateway speaks a plain OpenAI-compatible API, so any UI that supports a custom
-OpenAI-compatible endpoint works without changes to `gateway/`. `librechat.yaml` is kept
-around in case LibreChat comes back into consideration.
+**UI: `admin-ui/`** — this project's own Vite + React + TypeScript panel, not a
+third-party chat client. Real single-admin login (session cookie, nginx
+`auth_request`-gated), and three screens all wired to the real gateway: Chat
+(streaming replies, live step-tracing of which specialist is being consulted,
+inline markdown rendering), Memory (add/edit/delete a user's long-term facts),
+and Model Tiering (assign each of the 5 agent roles a cost tier, per user). See
+`admin-ui/README.md`. The gateway still speaks a plain OpenAI-compatible API
+underneath, so any other OpenAI-compatible client also works unchanged.
+`librechat.yaml` is kept around in case LibreChat comes back into consideration.
 
 Original infra design rationale and diagrams: `idx_agent_infrastructure_diagrams_md.md`
 (architecture) and `sectors_idx_ingest_cache_plan_md.md` (per-endpoint cache/ingest
@@ -213,16 +217,20 @@ happened. One concrete consequence: `analyze_portfolio`/`analyze_liquidity`/
 importable tools in `gateway/tools/portfolio_analysis.py`, ready for a Portfolio Risk
 Lead agent to pick up, but nothing in the live agent graph calls them right now.
 
-Both roles currently share whatever model is selected via `/v1/models` — per-role
-model tiering (business doc section 8: cheaper models for routine coordination,
-stronger ones for disputed conflicts) is not implemented.
+**Model tiering is implemented and per-user.** `models.yaml` now has three real,
+usable Anthropic entries — `idx-analyst-claude` (Haiku 4.5, `cheap`),
+`idx-analyst-claude-sonnet` (Sonnet 5, `standard`), `idx-analyst-claude-opus`
+(Opus 5 at `effort: max`, `strong`) — every role defaults to `cheap`, and
+`gateway/roles/orchestrator.py::resolve_role_tiers` overlays a per-`(user_id,
+role_id)` override read from Postgres (`role_tier_config`, admin-ui's Model
+Tiering screen writes it via `PATCH /v1/admin/model-tiers/{role}`). `idx-analyst-gpt`
+(OpenAI) still has `model_id: TODO` and no key — untested, and `select_for_tier`
+skips it automatically. See `models.yaml`'s own header comment for why Opus, not
+"Sonnet at max effort", was picked for `strong`.
 
-**Tested against a live LLM** — `models.yaml`'s `idx-analyst-claude` entry uses
-`claude-haiku-4-5-20251001` (deliberately the cheapest current Claude model, given a
-limited credit budget). A real conversation, including one that exercised the full
-Chief -> Investment Research Lead -> tool-call path, has been run and traced
-end to end — see PROGRESS.md items 12-14. `idx-analyst-gpt` (OpenAI) still has
-`model_id: TODO` and no key — untested.
+**Tested against a live LLM** — a real conversation, including one that exercised
+the full Chief -> Investment Research Lead -> tool-call path, has been run and
+traced end to end for all three tiers — see PROGRESS.md items 12-14 and 36.
 
 ## Session and memory
 
@@ -249,7 +257,10 @@ bugs found and fixed along the way):
   full-text search (OR-of-words, ranked by `ts_rank`), not embeddings — zero
   additional API cost, matching this project's credit-consciousness. No automatic
   background extraction or context injection either, for the same reason: memory
-  only costs something when the Chief (or the user) actually asks for it.
+  only costs something when the Chief (or the user) actually asks for it. Full
+  CRUD from the gateway (`GET`/`POST`/`PATCH`/`DELETE /v1/memory`) and from
+  admin-ui's Memory screen — every operation scoped to the requesting user, so
+  one user can't read or edit another's facts.
 
 ```
 python scripts/manage.py init-db   # picks up the new user_memory table
@@ -258,7 +269,10 @@ python scripts/manage.py init-db   # picks up the new user_memory table
 ## Observability and evaluation (Arize Phoenix)
 
 `docker-compose.yml`'s `phoenix` service is wired up and verified working, not just
-configured:
+configured. It's backed by Postgres (`PHOENIX_SQL_DATABASE_URL`, its own `phoenix`
+database, created via `postgres-init/`), not the default ephemeral SQLite file —
+traces survive a full container stop/rm/recreate, confirmed live (PROGRESS.md
+item 33).
 
 ```
 docker compose up -d phoenix        # or it comes up with the full stack
@@ -329,12 +343,12 @@ fixed yet (PROGRESS.md item 15).
 docker compose up -d
 ```
 
-Brings up the agent gateway (on `localhost:8000`), the ingest worker, Valkey, Postgres,
-and Phoenix. No chat UI is included yet — hit the gateway directly with curl/Postman, or
-add a UI service (see above) once that's decided. This is a local-only setup with no
-TLS termination — if it's ever deployed on a public VM, put a proxy (Caddy, nginx, a
-cloud load balancer) in front of whichever UI ends up in front. Not yet exercised
-end-to-end in this repo — see PROGRESS.md for what has and hasn't been verified.
+Brings up the agent gateway (`localhost:8000`), `admin-ui` (`localhost:5173`, real
+login — set `ADMIN_PASSWORD` in `.env`), the ingest worker, Valkey, Postgres, and
+Phoenix (`localhost:6006`). Verified end-to-end through the full container chain
+(admin-ui -> nginx -> gateway -> Postgres/Valkey), not just per-service. This is a
+local-only setup with no TLS termination — if it's ever deployed on a public VM,
+put a proxy (Caddy, nginx, a cloud load balancer) in front of `admin-ui`.
 
 ## Running the gateway alone
 

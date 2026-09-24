@@ -14,16 +14,20 @@ the same limiter `/v1/chat/completions` already uses. One operator, not a users
 table — see `gateway/main.py`'s `login()` docstring and PROGRESS.md item 31 for
 why, and what a real multi-user version would need instead.
 
-- **Chat** — session-style conversation UI. **Mock** (user's explicit choice,
-  wired to the real gateway later) — see `src/api/chat.ts`.
-- **Memory** — real. Lists, adds, and deletes a user's long-term memory facts via
-  `gateway/main.py`'s `/v1/memory` endpoints (backed by Postgres' `user_memory`
-  table) — the same store the Chief's `search_memory`/`add_memory` tools read and
-  write mid-conversation. See `src/api/memory.ts`.
-- **Model Tiering** — real UI, mock config. Assign each of the 5 agent roles a
-  cost tier and see which real model it resolves to. Backed by a local mock
-  (`src/api/modelTiers.ts`) since there's no admin API for `ROLE_TIERS` yet — see
-  that file's header comment.
+- **Chat** — real. Streams from `gateway/main.py`'s `/v1/chat/completions`
+  (SSE), with live step-tracing (which specialist/tool the Chief is currently
+  calling, surfaced from `current_tool_use` in the stream) and inline markdown
+  rendering (`src/markdown.tsx` — bold/italic/code/links, no dependency). Each
+  local session doubles as the server-side `X-Session-Id`. See `src/api/chat.ts`.
+- **Memory** — real. Full CRUD (add, edit, delete) on a user's long-term memory
+  facts via `gateway/main.py`'s `/v1/memory` endpoints (backed by Postgres'
+  `user_memory` table) — the same store the Chief's `search_memory`/`add_memory`
+  tools read and write mid-conversation. Every operation is scoped to the
+  requesting user. See `src/api/memory.ts`.
+- **Model Tiering** — real, per user. Assign each of the 5 agent roles a cost
+  tier and see which real model it resolves to; reads/writes
+  `gateway/main.py`'s `/v1/admin/model-tiers` endpoints, backed by Postgres'
+  `role_tier_config` (keyed by `(user_id, role_id)`). See `src/api/modelTiers.ts`.
 
 ## Run it
 
@@ -37,11 +41,15 @@ Serves on `http://localhost:5173`. nginx (`Dockerfile` + `nginx.conf.template`)
 serves the built static app and reverse-proxies `/api/` to the `agent-gateway`
 container, injecting the bearer key server-side from `$IDX_GATEWAY_KEY` — the
 browser never sees the key and there's no CORS to configure (same-origin from
-its perspective). Verified end-to-end (`docker compose build && up`): add/list/
-delete against real Postgres through the full container chain, and the proxy
-self-heals (via nginx's dynamic DNS resolution, `resolver 127.0.0.11`) if
-`agent-gateway` gets recreated with a new container IP without restarting
-`admin-ui`.
+its perspective). Every request under `/api/` also passes through nginx's
+`auth_request /auth/verify` gate first — a valid `admin_session` cookie is
+required before anything reaches the gateway, not just a client-side route
+guard. Verified end-to-end (`docker compose build && up`) through the full
+container chain: login/logout, memory add/edit/delete, per-user model tiering,
+and a real streamed chat reply with step-tracing all against real Postgres/the
+real gateway — and the proxy self-heals (via nginx's dynamic DNS resolution,
+`resolver 127.0.0.11`) if `agent-gateway` gets recreated with a new container IP
+without restarting `admin-ui`.
 
 **Local dev (hot reload):**
 
