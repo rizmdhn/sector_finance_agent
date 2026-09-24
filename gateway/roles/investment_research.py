@@ -18,12 +18,22 @@ gateway/roles/orchestrator.py).
 """
 
 from strands import Agent
+from strands.types.agent import Limits
 
+from gateway.bounded_agent import BoundedAgent
 from gateway.registry import ModelEntry, build_model
 from gateway.tools.company_report import get_company_report
 from gateway.tools.portfolio_analysis import analyze_fundamentals
 from gateway.tools.price_history import get_price_history
 from gateway.tools.screener import screen_companies
+
+# Guardrail against a runaway conversation (retry loops, a confused model calling
+# tools indefinitely) burning credit with no cap — see gateway/bounded_agent.py for
+# why this can't just be a `limits=` kwarg at the call site (`.as_tool()` doesn't
+# forward one). Sized generously above what real usage has shown (2-3 tool calls per
+# question in live testing — see PROGRESS.md item 17), not tuned tight; the point is
+# a hard backstop, not a budget this role is expected to bump against normally.
+DEFAULT_LIMITS = Limits(turns=8, total_tokens=80_000)
 
 NAME = "investment_research_lead"
 
@@ -51,8 +61,15 @@ data does not support an adjustment, keep the reported number and say why.
 - Valuation and expectations: use the valuation figures the tools return (P/E, P/B, \
 EV/EBITDA, and Sectors' own reported multiples where available). State which \
 comparison you are using (peers, own history, or a cash-flow figure) and which \
-assumption matters most. FCFF/FCFE will often come back `Unavailable` for this data \
-source — say so rather than estimating a substitute.
+assumption matters most. `analyze_fundamentals`'s own FCFF/FCFE will often come \
+back `Unavailable` — say so rather than estimating a substitute. `get_company_report` \
+separately exposes Sectors' own reported `free_cash_flow`/`operating_cash_flow` \
+fields (real data, confirmed present) — these are NOT the same metric as FCFE/FCFF \
+(different definition, unknown methodology) and must never be relabeled or silently \
+substituted as if they were. If you use one of these fields when FCFE/FCFF is \
+`Unavailable`, name it explicitly as "Sectors' reported free_cash_flow" (not \
+"FCFE" or "FCF proxy"), state you don't know its exact calculation methodology, \
+and let the reader judge its relevance rather than presenting it as equivalent.
 - Ownership and governance: not wired to a real data tool yet in this build — say \
 so explicitly if asked, rather than fabricating a control or free-float figure.
 - Thesis monitoring: not implemented yet — each answer here is a fresh assessment, \
@@ -68,6 +85,11 @@ that explicitly rather than treating it as zero or silently leaving it out.
 change the assessment — "the stock fell" is not a sufficient thesis-break condition.
 - You are not a financial adviser. Do not give buy/sell/hold recommendations.
 - If a tool reports an unknown symbol, say so rather than guessing a ticker.
+- If a per-share figure (shares outstanding, FCF/share, dividend/share) computed \
+one way conflicts with the same thing computed another way (e.g. shares implied \
+by market_cap/price vs. a reported shares-outstanding figure; a dividend total \
+from corporate actions vs. a sum of individual ex-dates), say so explicitly and \
+state both numbers with their source rather than silently picking one.
 """
 
 TOOLS = [get_company_report, get_price_history, analyze_fundamentals, screen_companies]
@@ -77,10 +99,11 @@ def build_investment_research_lead(model_entry: ModelEntry) -> Agent:
     if not model_entry.supports_tools:
         raise ValueError(f"model {model_entry.name} does not support tool calling")
 
-    return Agent(
+    return BoundedAgent(
         name=NAME,
         description=DESCRIPTION,
         model=build_model(model_entry),
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
+        default_limits=DEFAULT_LIMITS,
     )

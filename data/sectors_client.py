@@ -23,11 +23,20 @@ with a real key, not by re-reading documentation.
 
 Paths were verified live; most *filter query parameter names* were not (only tested
 with zero params, which returned 200). `date`/`start`/`end`/`symbol` args on
-get_corporate_actions_calendar, get_filings, get_news, get_suspensions,
-get_top_brokers_daily, and get_foreign_flow_daily are best-guess parameter names, not
-confirmed — verify each before relying on them to actually filter (an unrecognized
-query param is typically just ignored by REST APIs, which would silently return
-unfiltered results rather than erroring, so this is easy to miss).
+get_corporate_actions_calendar, get_suspensions, get_top_brokers_daily, and
+get_foreign_flow_daily are still best-guess parameter names, not confirmed — verify
+each before relying on them to actually filter (an unrecognized query param is
+typically just ignored by REST APIs, which would silently return unfiltered results
+rather than erroring, so this is easy to miss).
+
+Two of these were confirmed live via a real agent conversation (2026-09-24), not by
+direct probing — see PROGRESS.md item 19:
+  - `get_filings(symbol=...)` and `get_corporate_actions(symbol=...)`: confirmed
+    working — a live call for BBCA returned BBCA-specific insider-filing and
+    AGM/dividend data, not an unfiltered dump.
+  - `get_news(symbol=...)`: confirmed the OPPOSITE of "silently ignored" — the API
+    hard-errors (400) on an unrecognized `symbol` param rather than ignoring it. The
+    real param is `symbols` (plural); fixed below.
 
 Still unresolved despite direct probing (not in ENDPOINTS, no method exists):
   - Revenue segments / companies-with-revenue-segments (no working path found).
@@ -217,7 +226,14 @@ class SectorsClient:
         return self._get("filings", symbol=symbol)
 
     def get_news(self, symbol: str | None = None) -> dict:
-        return self._get("news", symbol=symbol)
+        """Confirmed live (2026-09-24): `/news/` rejects a `symbol` param outright
+        (400: "Unsupported query parameter(s): symbol. Allowed: commodity_type, end,
+        extension, keyword, limit, offset, sector, start, sub_sector, symbols,
+        tags.") — the real param is the plural `symbols`. `get_filings`/
+        `get_corporate_actions_symbol` do accept `symbol` (singular) and were
+        confirmed live to actually scope results, so this is a `/news/`-specific
+        quirk, not a client-wide naming mistake."""
+        return self._get("news", symbols=symbol)
 
     def get_suspensions(self) -> dict:
         return self._get("suspensions")

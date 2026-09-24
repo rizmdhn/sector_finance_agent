@@ -192,3 +192,281 @@ def get_broker_activity(
     rows = client.get_broker_activity_symbol(symbol, start=iso_date, end=iso_date)
     db.store_broker_activity(symbol, trade_date, rows)
     return rows
+
+
+# -- Event/news data: CACHE (Valkey, short TTL) + durable audit trail (Postgres) --
+#
+# Corporate actions, filings, news, and foreign flow have no change-detector or
+# epoch tracking their update cadence (unlike price_epoch/fund_epoch) — there is no
+# signal here for "has this actually changed" the way there is for prices or
+# financials. A flat TTL is a deliberate compromise: short enough that a market
+# question doesn't answer from meaningfully stale data, long enough that the same
+# symbol asked about twice in quick succession (a real, observed usage pattern —
+# see PROGRESS.md's earlier BBCA-caching discussion) costs 1 credit, not N. If this
+# TTL turns out wrong for how fast any of these actually change, tighten or loosen
+# it per endpoint rather than assuming one number fits all four.
+#
+# Valkey alone was the original design here — the user noticed live that a real
+# Sectors API call for news never showed up in Postgres, unlike every other real
+# data source in this project (price_daily, broker_activity, user_memory). That's a
+# real gap for this product: the Independent Risk and Evidence Officer's job is to
+# "follow a material claim back to its source" (business doc), and Valkey's 1-hour
+# TTL means that source could be gone within the hour a review happens, with no
+# durable record of exactly what the agent saw and when. So every REAL fetch (cache
+# miss only — a Valkey hit writes nothing new) also gets persisted below, using
+# tables that already existed in data/schema.sql from an earlier, unfinished
+# INGEST-job design (corporate_actions, filings, news_articles, foreign_flow_daily)
+# but had no writer until now. This costs zero extra Sectors credit — it's an extra
+# Postgres write on data already paid for, not an extra API call.
+EVENT_DATA_TTL_SECONDS = 60 * 60
+
+
+def _corporate_action_rows(symbol: str, payload: dict) -> list[dict]:
+    """Flattens the API's {"corporate_actions": {action_type: [item, ...]}} shape
+    into one row per item, matching Database.upsert_corporate_actions. Different
+    action types use different date field names (dividend: ex_date, stock_split:
+    date, agm: agm_date) — tried in that order; a type/item with none of these
+    (e.g. bonus/warrant/right_issue when null in the real BBCA response) just gets
+    a NULL ex_date rather than being dropped, since the payload itself is still
+    worth keeping as an audit record even without a dedup date.
+    """
+    by_type = (payload or {}).get("corporate_actions") or {}
+    rows = []
+    for action_type, items in by_type.items():
+        for item in items or []:
+            ex_date = item.get("ex_date") or item.get("date") or item.get("agm_date")
+            rows.append({"symbol": symbol, "action_type": action_type, "ex_date": ex_date, "payload": item})
+    return rows
+
+
+def _filing_rows(symbol: str | None, payload: dict) -> list[dict]:
+    """Matches Database.upsert_filings. `filed_at` is NOT NULL in the schema, so a
+    result item with no `timestamp` is skipped rather than inserted with a
+    fabricated date — not observed in practice against the real API, but cheap
+    insurance against a write-time crash on a future response shape change."""
+    return [
+        {"symbol": item.get("symbol") or symbol, "holder_type": item.get("holder_type"), "filed_at": item["timestamp"], "payload": item}
+        for item in (payload or {}).get("results") or []
+        if item.get("timestamp")
+    ]
+
+
+def _news_rows(symbol: str | None, payload: dict) -> list[dict]:
+    """Matches Database.upsert_news_articles. One real article can cover multiple
+    symbols (`symbols: [...]`, confirmed live) — stored as one row per symbol so a
+    later per-symbol query finds it, at the cost of duplicate rows for a
+    multi-symbol article. `extension` is NOT NULL in the schema with no equivalent
+    field in the real response; set to a constant "idx" rather than left to guess
+    at the original ingest plan's unimplemented multi-source distinction."""
+    rows = []
+    for item in (payload or {}).get("results") or []:
+        if not item.get("timestamp"):
+            continue
+        symbols_covered = item.get("symbols") or ([symbol] if symbol else [None])
+        for covered in symbols_covered:
+            rows.append(
+                {
+                    "symbol": covered,
+                    "extension": "idx",
+                    "published_at": item["timestamp"],
+                    "title": item.get("title"),
+                    "url": item.get("source"),
+                    "tags": item.get("tags"),
+                    "body": item.get("body"),
+                }
+            )
+    return rows
+
+
+def _foreign_flow_rows(payload: dict) -> list[dict]:
+    """Matches Database.upsert_foreign_flow. Confirmed live: this is a market-wide
+    top-N-by-inflow feed, not filterable to one symbol (data/sectors_client.py) —
+    every row here covers whatever symbols the API chose to return that date, not
+    necessarily the one the caller asked about."""
+    return [
+        {"symbol": item["symbol"], "trade_date": item["date"], "net_value": item.get("net_foreign_inflow")}
+        for item in (payload or {}).get("results") or []
+        if item.get("symbol") and item.get("date")
+    ]
+
+
+def get_corporate_actions(cache: Cache, db: Database, client: SectorsClient, symbol: str) -> dict:
+    symbol = ensure_valid_symbol(db, symbol)
+    key = cache_key("corporate_actions", {"symbol": symbol})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock(f"corporate_actions:{symbol}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_corporate_actions(symbol)
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            rows = _corporate_action_rows(symbol, cached)
+            if rows:
+                db.upsert_corporate_actions(rows)
+    return cached
+
+
+def get_filings(cache: Cache, db: Database, client: SectorsClient, symbol: str | None) -> dict:
+    if symbol is not None:
+        symbol = ensure_valid_symbol(db, symbol)
+    key = cache_key("filings", {"symbol": symbol})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock(f"filings:{symbol or 'all'}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_filings(symbol)
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            rows = _filing_rows(symbol, cached)
+            if rows:
+                db.upsert_filings(rows)
+    return cached
+
+
+def get_news(cache: Cache, db: Database, client: SectorsClient, symbol: str | None) -> dict:
+    if symbol is not None:
+        symbol = ensure_valid_symbol(db, symbol)
+    key = cache_key("news", {"symbol": symbol})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock(f"news:{symbol or 'all'}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_news(symbol)
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            rows = _news_rows(symbol, cached)
+            if rows:
+                db.upsert_news_articles(rows)
+    return cached
+
+
+def get_foreign_flow(cache: Cache, db: Database, client: SectorsClient, trade_date: str | None) -> dict:
+    """`trade_date`: ISO date string, or None for whatever the API defaults to
+    (unconfirmed — see data/sectors_client.py's note that filter params on this
+    endpoint were never verified to actually filter)."""
+    key = cache_key("foreign_flow", {"trade_date": trade_date})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock(f"foreign_flow:{trade_date or 'latest'}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_foreign_flow_daily(trade_date)
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            rows = _foreign_flow_rows(cached)
+            if rows:
+                db.upsert_foreign_flow(rows)
+    return cached
+
+
+# -- Corporate actions calendar, suspensions, top brokers: CACHE + durable audit --
+#
+# These three were confirmed to exist (data/sectors_client.py) but had no
+# repository wrapper, no gateway tool, and had never actually been called against
+# the real API until now — first live calls (2026-09-24) confirmed each shape below
+# directly, not guessed. Same CACHE + Postgres-audit-trail pattern as
+# get_corporate_actions/get_filings/get_news/get_foreign_flow above.
+
+
+def _corporate_action_calendar_rows(payload: dict) -> list[dict]:
+    """The bulk calendar's shape differs from the per-symbol endpoint's: no
+    wrapping "corporate_actions" key, and each item carries its OWN `symbol`
+    (confirmed live: {"start":..., "end":..., "dividend": [{"symbol": "BBCA.JK",
+    "ex_date": ..., ...}], ...}). Reuses the `corporate_actions` table/upsert —
+    same (symbol, action_type, ex_date) shape as _corporate_action_rows above.
+    """
+    rows = []
+    for action_type, items in (payload or {}).items():
+        if action_type in ("start", "end") or not isinstance(items, list):
+            continue
+        for item in items:
+            symbol = item.get("symbol")
+            if not symbol:
+                continue
+            ex_date = item.get("ex_date") or item.get("date") or item.get("agm_date")
+            rows.append({"symbol": symbol, "action_type": action_type, "ex_date": ex_date, "payload": item})
+    return rows
+
+
+def _suspension_rows(payload: dict) -> list[dict]:
+    """Matches Database.upsert_suspensions (symbol, suspended_at, reason). The
+    real response also carries a `pdf_url` per suspension that the existing
+    `suspensions` table (data/schema.sql) has no column for — dropped here rather
+    than widening the schema for one field; still present in the live tool result
+    the agent sees, just not persisted."""
+    return [
+        {"symbol": item["symbol"], "suspended_at": item.get("suspension_date"), "reason": item.get("reason")}
+        for item in (payload or {}).get("results") or []
+        if item.get("symbol") and item.get("suspension_date")
+    ]
+
+
+def _top_broker_rows(payload: dict) -> tuple[str | None, list[dict]]:
+    """Matches Database.upsert_broker_rankings (trade_date_, rows of
+    {broker_code, payload}) — the real response's `date` field names which
+    trading day these rankings are for; each result row is stored whole as the
+    per-broker payload (rank, gross, net, foreign_gross, foreign_net)."""
+    trade_date_str = (payload or {}).get("date")
+    rows = [
+        {"broker_code": item["broker_code"], "payload": item}
+        for item in (payload or {}).get("results") or []
+        if item.get("broker_code")
+    ]
+    return trade_date_str, rows
+
+
+def get_corporate_actions_calendar(
+    cache: Cache, db: Database, client: SectorsClient, start: str | None, end: str | None
+) -> dict:
+    """`start`/`end`: ISO dates, or None for whatever the API defaults to
+    (confirmed live: a 2-month window ending ~1 month out from today when called
+    with no params — but that default window is observed behavior, not a
+    documented contract, so don't assume it holds forever)."""
+    key = cache_key("corporate_actions_calendar", {"start": start, "end": end})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock(f"corporate_actions_calendar:{start}:{end}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_corporate_actions_calendar(start, end)
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            rows = _corporate_action_calendar_rows(cached)
+            if rows:
+                db.upsert_corporate_actions(rows)
+    return cached
+
+
+def get_suspensions(cache: Cache, db: Database, client: SectorsClient) -> dict:
+    key = cache_key("suspensions", {})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock("suspensions"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_suspensions()
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            rows = _suspension_rows(cached)
+            if rows:
+                db.upsert_suspensions(rows)
+    return cached
+
+
+def get_top_brokers_daily(cache: Cache, db: Database, client: SectorsClient, trade_date: str | None) -> dict:
+    key = cache_key("top_brokers_daily", {"trade_date": trade_date})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    with cache.acquire_lock(f"top_brokers_daily:{trade_date or 'latest'}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_top_brokers_daily(trade_date)
+            cache.set(key, cached, ttl=EVENT_DATA_TTL_SECONDS)
+            trade_date_str, rows = _top_broker_rows(cached)
+            if rows and trade_date_str:
+                db.upsert_broker_rankings(date.fromisoformat(trade_date_str), rows)
+    return cached
