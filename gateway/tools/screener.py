@@ -7,12 +7,12 @@ from data.deps import get_cache, get_client
 
 
 @tool
-def screen_companies(where: dict, order_by: str, limit: int) -> list[dict]:
+def screen_companies(where: str, order_by: str, limit: int) -> list[dict]:
     """Screen IDX-listed companies against structured filters.
 
     Args:
-        where: Field filters from the allowed field list.
-        order_by: Field to sort by.
+        where: A SQL-like condition string, e.g. "sector='Financials' and market_cap>1000000000000".
+        order_by: Field to sort by; prefix with "-" for descending, e.g. "-market_cap".
         limit: Max number of results.
     """
     return repositories.screen_companies(

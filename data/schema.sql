@@ -37,20 +37,6 @@ CREATE TABLE IF NOT EXISTS price_daily (
 );
 CREATE INDEX IF NOT EXISTS price_daily_trade_date_idx ON price_daily (trade_date);
 
--- INGEST: daily full-universe index close.
-CREATE TABLE IF NOT EXISTS index_daily (
-    index_code  TEXT NOT NULL,
-    trade_date  DATE NOT NULL,
-    close       NUMERIC,
-    PRIMARY KEY (index_code, trade_date)
-);
-
--- INGEST: IDX market summary, up to 90 days.
-CREATE TABLE IF NOT EXISTS market_summary_daily (
-    trade_date  DATE PRIMARY KEY,
-    payload     JSONB NOT NULL
-);
-
 -- INGEST change detector: latest quarterly financial dates, per symbol.
 -- Diffing the previous snapshot against a new pull bumps the symbol's
 -- Valkey version (Cache.bump_symbol_version) and fund_epoch.
@@ -128,13 +114,4 @@ CREATE TABLE IF NOT EXISTS broker_activity (
     payload     JSONB NOT NULL,
     fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (symbol, trade_date)
-);
-
--- LAZY-ATOMIC: broker activity by broker code/date.
-CREATE TABLE IF NOT EXISTS broker_activity_by_code (
-    broker_code TEXT NOT NULL,
-    trade_date  DATE NOT NULL,
-    payload     JSONB NOT NULL,
-    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (broker_code, trade_date)
 );

@@ -17,8 +17,11 @@ from data.canonical import (
 from data.db import Database
 from data.sectors_client import SectorsClient
 
-# TODO: confirm the section list and which ones are price-linked vs fundamentals
-# against the Company Report page (sectors_idx_ingest_cache_plan_md.md section 8).
+# Confirmed live (2026-09-24) against company/report/{symbol}/: the real section
+# list is overview, valuation, future, peers, financials, dividend, management,
+# ownership. overview/valuation/peers are price-driven (market cap, close price,
+# peer multiples); financials/dividend/management/ownership change on a filing/
+# reporting cadence, so they key off the symbol version instead of price_epoch.
 PRICE_LINKED_REPORT_SECTIONS = {"overview", "valuation", "peers"}
 
 ANNUAL_FIELD_TTL_SECONDS = 24 * 60 * 60
@@ -92,14 +95,16 @@ def get_company_report(
 def screen_companies(
     cache: Cache,
     client: SectorsClient,
-    where: dict,
+    where: str,
     order_by: str = "symbol",
-    desc: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
-    canonical = canonicalize_screener_query(where, order_by, desc)
-    classes = screener_field_classes(where, order_by)
+    """`where` is Sectors' own SQL-like condition string, e.g. "sector='Financials'
+    and market_cap>1000000000000". Prefix `order_by` with "-" for descending
+    (Sectors' own convention, confirmed live — see data/sectors_client.py)."""
+    canonical = canonicalize_screener_query(where, order_by)
+    classes = screener_field_classes(canonical["where"], canonical["order_by"])
 
     epoch = None
     ttl = None
@@ -120,31 +125,13 @@ def screen_companies(
             rows = cache.get(key)
             if rows is None:
                 response = client.get_screener(
-                    where=canonical["where"], order_by=canonical["order_by"],
-                    desc=canonical["desc"], limit=200, offset=0,
+                    where=canonical["where"] or None, order_by=canonical["order_by"],
+                    limit=200, offset=0,
                 )
-                rows = response.get("data", response)
+                rows = response.get("results", [])
                 cache.set(key, rows, ttl=ttl)
 
     return rows[offset : offset + limit]
-
-
-# -- Market movers: CACHE, until next daily ingest ----------------------------
-
-
-def get_market_movers(
-    cache: Cache, client: SectorsClient, classification: str, period: str
-) -> list[dict]:
-    epoch = cache.get_epoch(EPOCH_PRICE)
-    key = cache_key("top_movers", {"classification": classification, "period": period}, epoch=epoch)
-    rows = cache.get(key)
-    if rows is None:
-        with cache.acquire_lock(key):
-            rows = cache.get(key)
-            if rows is None:
-                rows = client.get_top_movers(classification, period)
-                cache.set(key, rows)
-    return rows
 
 
 # -- Price history: INGEST-served, read straight from the price store --------
@@ -158,6 +145,36 @@ def get_price_history(db: Database, symbol: str, period: str) -> list[dict]:
     end = db.latest_trade_date() or date.today()
     start = end - timedelta(days=days)
     return db.read_price_range(symbol, start, end)
+
+
+# -- Price detail backfill: LAZY-ATOMIC, fills what the bulk close feed lacks ----
+
+
+def ensure_price_detail(db: Database, client: SectorsClient, symbol: str) -> None:
+    """The bulk daily close feed (ingest/jobs/universe_close.py) only has
+    symbol/date/close — confirmed live against the real API, no volume or market cap.
+    Liquidity calculations (analysis/liquidity.py) need volume-derived traded value,
+    so call this before those to backfill up to 90 days of OHLCV + market cap for one
+    symbol via the per-symbol endpoint. Safe to call repeatedly — upsert_price_rows
+    overwrites with the latest values without duplicating rows.
+    """
+    symbol = ensure_valid_symbol(db, symbol)
+    rows = client.get_daily_transaction(symbol)
+    db.upsert_price_rows(
+        [
+            {
+                "symbol": r["symbol"],
+                "trade_date": date.fromisoformat(r["date"]),
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": r.get("volume"),
+                "market_cap": r.get("market_cap"),
+            }
+            for r in rows
+        ]
+    )
 
 
 # -- Broker activity per symbol: LAZY-ATOMIC, past days never expire ---------

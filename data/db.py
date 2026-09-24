@@ -21,6 +21,11 @@ class Database:
     def _connect(self):
         return psycopg.connect(self._dsn, row_factory=dict_row)
 
+    def _executemany(self, conn, sql: str, params: list) -> None:
+        # psycopg's Connection has no executemany of its own — only Cursor does.
+        with conn.cursor() as cur:
+            cur.executemany(sql, params)
+
     def init_schema(self) -> None:
         with self._connect() as conn:
             conn.execute(SCHEMA_PATH.read_text())
@@ -49,7 +54,8 @@ class Database:
 
     def upsert_symbol_master(self, rows: list[dict]) -> None:
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO symbol_master
                     (symbol, name, sector, subsector, industry, subindustry, listing_date, updated_at)
@@ -81,21 +87,29 @@ class Database:
     # -- Price store (INGEST) -------------------------------------------------
 
     def upsert_price_rows(self, rows: list[dict]) -> None:
-        """Each row: symbol, trade_date, open, high, low, close, volume, market_cap."""
+        """Each row: symbol, trade_date, open, high, low, close, volume, market_cap.
+
+        `COALESCE(EXCLUDED.x, price_daily.x)` on every conflict: the bulk daily-close
+        ingest (ingest/jobs/universe_close.py) only ever has `close`, and would
+        otherwise silently null out open/high/low/volume/market_cap already filled in
+        by the per-symbol LAZY-ATOMIC backfill (data/repositories.py::
+        ensure_price_detail), regardless of which one runs second.
+        """
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO price_daily
                     (symbol, trade_date, open, high, low, close, volume, market_cap)
                 VALUES (%(symbol)s, %(trade_date)s, %(open)s, %(high)s, %(low)s,
                         %(close)s, %(volume)s, %(market_cap)s)
                 ON CONFLICT (symbol, trade_date) DO UPDATE SET
-                    open = EXCLUDED.open,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume,
-                    market_cap = EXCLUDED.market_cap
+                    open = COALESCE(EXCLUDED.open, price_daily.open),
+                    high = COALESCE(EXCLUDED.high, price_daily.high),
+                    low = COALESCE(EXCLUDED.low, price_daily.low),
+                    close = COALESCE(EXCLUDED.close, price_daily.close),
+                    volume = COALESCE(EXCLUDED.volume, price_daily.volume),
+                    market_cap = COALESCE(EXCLUDED.market_cap, price_daily.market_cap)
                 """,
                 rows,
             )
@@ -116,6 +130,21 @@ class Database:
             row = conn.execute("SELECT max(trade_date) AS d FROM price_daily").fetchone()
             return row["d"] if row else None
 
+    def get_latest_close(self, symbol: str) -> tuple[date, float] | None:
+        """Most recent trade_date with a non-null close for one symbol, for
+        portfolio valuation (analysis/portfolio.py via data/analysis_bridge.py).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT trade_date, close FROM price_daily
+                WHERE symbol = %s AND close IS NOT NULL
+                ORDER BY trade_date DESC LIMIT 1
+                """,
+                (symbol,),
+            ).fetchone()
+            return (row["trade_date"], row["close"]) if row else None
+
     # -- Quarterly-dates change detector (INGEST) -----------------------------
 
     def diff_quarterly_dates(self, latest: dict[str, date]) -> list[str]:
@@ -134,7 +163,8 @@ class Database:
                 if previous.get(symbol) != report_date
             ]
 
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO quarterly_dates_snapshot (symbol, latest_report_date, updated_at)
                 VALUES (%s, %s, now())
@@ -151,7 +181,8 @@ class Database:
     def upsert_corporate_actions(self, rows: list[dict]) -> None:
         """Each row: symbol, action_type, ex_date, payload."""
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO corporate_actions (symbol, action_type, ex_date, payload, updated_at)
                 VALUES (%(symbol)s, %(action_type)s, %(ex_date)s, %(payload)s, now())
@@ -177,7 +208,8 @@ class Database:
     def upsert_foreign_flow(self, rows: list[dict]) -> None:
         """Each row: symbol, trade_date, net_value."""
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO foreign_flow_daily (symbol, trade_date, net_value)
                 VALUES (%(symbol)s, %(trade_date)s, %(net_value)s)
@@ -200,7 +232,8 @@ class Database:
     def upsert_broker_rankings(self, trade_date_: date, rows: list[dict]) -> None:
         """Each row: broker_code, payload (all brokers, unfiltered)."""
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO broker_rankings (trade_date, broker_code, payload)
                 VALUES (%(trade_date)s, %(broker_code)s, %(payload)s)
@@ -219,7 +252,8 @@ class Database:
     def upsert_suspensions(self, rows: list[dict]) -> None:
         """Each row: symbol, suspended_at, reason."""
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO suspensions (symbol, suspended_at, reason)
                 VALUES (%(symbol)s, %(suspended_at)s, %(reason)s)
@@ -231,7 +265,8 @@ class Database:
     def upsert_filings(self, rows: list[dict]) -> None:
         """Each row: symbol, holder_type, filed_at, payload."""
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO filings (symbol, holder_type, filed_at, payload)
                 VALUES (%(symbol)s, %(holder_type)s, %(filed_at)s, %(payload)s)
@@ -245,7 +280,8 @@ class Database:
     def upsert_news_articles(self, rows: list[dict]) -> None:
         """Each row: symbol, extension, published_at, title, url, tags, body."""
         with self._connect() as conn:
-            conn.executemany(
+            self._executemany(
+                conn,
                 """
                 INSERT INTO news_articles
                     (symbol, extension, published_at, title, url, tags, body)

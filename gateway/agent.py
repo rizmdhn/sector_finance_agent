@@ -7,7 +7,7 @@ from strands import Agent
 
 from gateway.registry import ModelEntry, build_model
 from gateway.tools.company_report import get_company_report
-from gateway.tools.market_movers import get_market_movers
+from gateway.tools.portfolio_analysis import analyze_liquidity, analyze_portfolio, analyze_returns
 from gateway.tools.price_history import get_price_history
 from gateway.tools.screener import screen_companies
 
@@ -24,7 +24,14 @@ not-financial-advice note.
 - If a tool reports an unknown symbol, tell the user rather than guessing a ticker.
 """
 
-MVP_TOOLS = [get_company_report, screen_companies, get_price_history, get_market_movers]
+MVP_TOOLS = [
+    get_company_report,
+    screen_companies,
+    get_price_history,
+    analyze_portfolio,
+    analyze_liquidity,
+    analyze_returns,
+]
 
 
 def build_agent(model_entry: ModelEntry) -> Agent:

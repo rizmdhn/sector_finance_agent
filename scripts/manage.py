@@ -9,8 +9,14 @@ Usage (run from the repo root, with .env variables exported into the shell):
     python scripts/manage.py run-job quarterly_dates
     python scripts/manage.py get-report BBCA overview,valuation
     python scripts/manage.py get-price-history BBCA 1m
-    python scripts/manage.py get-movers gainers 1d
-    python scripts/manage.py screen '{"sector": "Banks"}' market_cap
+    python scripts/manage.py backfill-price BBCA
+    python scripts/manage.py screen "sector='Financials'" --order-by=-market_cap
+    python scripts/manage.py analyze-portfolio "BBCA=1000,BMRI=500" --cash=10000000
+    python scripts/manage.py analyze-liquidity BBCA 50000000000
+    python scripts/manage.py analyze-returns BBCA 1m
+
+The analyze-* commands read only from Postgres (data/analysis_bridge.py) — they never
+call the Sectors API, so they cost zero credits regardless of how often they're run.
 """
 
 import argparse
@@ -20,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from data import repositories
+from data import analysis_bridge, repositories
 from data.deps import get_cache, get_client, get_db
 from ingest.jobs import quarterly_dates, symbol_master, universe_close
 
@@ -53,15 +59,33 @@ def cmd_get_price_history(args) -> None:
     print(json.dumps(rows, indent=2, default=str))
 
 
-def cmd_get_movers(args) -> None:
-    rows = repositories.get_market_movers(get_cache(), get_client(), args.classification, args.period)
-    print(json.dumps(rows, indent=2, default=str))
+def cmd_backfill_price(args) -> None:
+    repositories.ensure_price_detail(get_db(), get_client(), args.symbol)
+    print(f"backfilled OHLCV/market_cap for {args.symbol}")
 
 
 def cmd_screen(args) -> None:
-    where = json.loads(args.where)
-    rows = repositories.screen_companies(get_cache(), get_client(), where, order_by=args.order_by)
+    rows = repositories.screen_companies(get_cache(), get_client(), args.where, order_by=args.order_by)
     print(json.dumps(rows, indent=2, default=str))
+
+
+def cmd_analyze_portfolio(args) -> None:
+    positions = dict(item.split("=") for item in args.positions.split(","))
+    positions = {symbol: float(shares) for symbol, shares in positions.items()}
+    result = analysis_bridge.portfolio_snapshot(get_db(), positions, cash=args.cash)
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_analyze_liquidity(args) -> None:
+    result = analysis_bridge.liquidity_snapshot(
+        get_db(), args.symbol, position_value=args.position_value, participation_rate=args.participation_rate
+    )
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_analyze_returns(args) -> None:
+    result = analysis_bridge.returns_snapshot(get_db(), args.symbol, args.period)
+    print(json.dumps(result, indent=2, default=str))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,15 +108,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("period", choices=["1m", "3m", "1y"])
     p.set_defaults(func=cmd_get_price_history)
 
-    p = sub.add_parser("get-movers", help="Fetch/cache top market movers")
-    p.add_argument("classification")
-    p.add_argument("period")
-    p.set_defaults(func=cmd_get_movers)
+    p = sub.add_parser(
+        "backfill-price", help="LAZY-ATOMIC: fill volume/market_cap for one symbol (the bulk close feed lacks them)"
+    )
+    p.add_argument("symbol")
+    p.set_defaults(func=cmd_backfill_price)
 
     p = sub.add_parser("screen", help="Fetch/cache a screener query (requires symbol_master ingest first)")
-    p.add_argument("where", help='JSON object, e.g. \'{"sector": "Banks"}\'')
-    p.add_argument("order_by", nargs="?", default="symbol")
+    p.add_argument("where", help="SQL-like condition string, e.g. \"sector='Financials'\"")
+    # A positional wouldn't work here: argparse treats a bare "-market_cap" value as
+    # an unrecognized flag, since it starts with "-" (Sectors' own descending-sort
+    # convention). --order-by=-market_cap (the "=" form) sidesteps that.
+    p.add_argument("--order-by", dest="order_by", default="symbol", help='e.g. "-market_cap" for descending')
     p.set_defaults(func=cmd_screen)
+
+    p = sub.add_parser(
+        "analyze-portfolio",
+        help="Portfolio value/weights/concentration from ingested prices (analysis/portfolio.py, no API call)",
+    )
+    p.add_argument("positions", help='comma-separated symbol=shares, e.g. "BBCA=1000,BMRI=500"')
+    p.add_argument("--cash", type=float, default=0.0)
+    p.set_defaults(func=cmd_analyze_portfolio)
+
+    p = sub.add_parser(
+        "analyze-liquidity",
+        help="ADV20 and normal exit days from ingested prices (analysis/liquidity.py, no API call)",
+    )
+    p.add_argument("symbol")
+    p.add_argument("position_value", type=float)
+    p.add_argument("--participation-rate", type=float, default=0.1, dest="participation_rate")
+    p.set_defaults(func=cmd_analyze_liquidity)
+
+    p = sub.add_parser(
+        "analyze-returns",
+        help="Price returns and drawdown from ingested prices (analysis/returns.py, no API call)",
+    )
+    p.add_argument("symbol")
+    p.add_argument("period", choices=["1m", "3m", "1y"])
+    p.set_defaults(func=cmd_analyze_returns)
 
     return parser
 

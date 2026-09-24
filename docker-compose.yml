@@ -27,12 +27,16 @@ services:
   valkey:
     image: valkey/valkey:latest
     command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
     volumes:
       - valkey_data:/data
 
   postgres:
     image: pgvector/pgvector:pg16
     env_file: .env
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

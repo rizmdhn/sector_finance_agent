@@ -7,7 +7,11 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from data.deps import get_cache, get_client, get_db
-from ingest.jobs import quarterly_dates, symbol_master, universe_close
+from ingest.jobs import symbol_master, universe_close
+
+# quarterly_dates is deliberately not scheduled: its job now raises NotImplementedError
+# on every run (see ingest/jobs/quarterly_dates.py) since no working bulk endpoint was
+# found for it. Re-add it here once that job is redesigned or the endpoint is found.
 
 TIMEZONE = "Asia/Jakarta"
 
@@ -30,13 +34,6 @@ def build_scheduler() -> BlockingScheduler:
         CronTrigger(hour="16-19", minute="*/5", timezone=TIMEZONE),
         args=[db, cache, client],
         id="universe_close_poll",
-    )
-
-    scheduler.add_job(
-        quarterly_dates.run,
-        CronTrigger(hour=18, minute=0, timezone=TIMEZONE),
-        args=[db, cache, client],
-        id="quarterly_dates_daily",
     )
 
     return scheduler

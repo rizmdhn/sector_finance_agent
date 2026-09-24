@@ -1,11 +1,14 @@
 """Canonicalization: symbol form, cache key construction, screener query normalization.
 
 Shared by gateway/ and ingest/.
-See sectors_idx_ingest_cache_plan_md.md sections 3 and 5.
+See sectors_idx_ingest_cache_plan_md.md sections 3 and 5, and
+data/sectors_client.py's module docstring for what was verified live against the real
+API vs. assumed.
 """
 
 import hashlib
 import json
+import re
 from datetime import date
 
 CACHE_KEY_VERSION = "v1"
@@ -68,58 +71,43 @@ def _field_class(field: str) -> str:
     return "static"
 
 
-def screener_field_classes(where: dict, order_by: str | None) -> set[str]:
+# Matches an identifier (optionally with bracket notation, e.g. "revenue[2024]")
+# immediately followed by a comparison operator, to pull field names out of a
+# Sectors SQL-like `where` string such as "sector='Financials' and market_cap>1e12".
+_FIELD_TOKEN_RE = re.compile(
+    r"([a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]*\])?)\s*(?:=|!=|>=|<=|>|<|\blike\b|\bin\b)",
+    re.IGNORECASE,
+)
+
+
+def screener_field_classes(where: str, order_by: str | None) -> set[str]:
     """Which epoch/TTL classes a screener query touches, for cache-key epoch selection."""
-    fields = list(where.keys())
+    fields = _FIELD_TOKEN_RE.findall(where or "")
     if order_by:
-        fields.append(order_by)
+        fields.append(order_by.lstrip("-"))
     return {_field_class(f) for f in fields}
 
 
-def _sort_and_clause(conditions: list) -> list:
-    """Sort conditions within an AND clause only; never reorder across OR.
-
-    Each condition is either a leaf dict {"field", "op", "value"} or a nested
-    {"and": [...]} / {"or": [...]} clause.
-    """
-    normalized = [_canonicalize_clause(c) for c in conditions]
-    return sorted(normalized, key=lambda c: json.dumps(c, sort_keys=True))
-
-
-def _canonicalize_clause(clause: dict) -> dict:
-    if "and" in clause:
-        return {"and": _sort_and_clause(clause["and"])}
-    if "or" in clause:
-        return {"or": [_canonicalize_clause(c) for c in clause["or"]]}
-    return {
-        "field": str(clause["field"]).lower(),
-        "op": str(clause["op"]).lower(),
-        "value": clause["value"],
-    }
-
-
-def canonicalize_screener_query(
-    where: dict | list,
-    order_by: str = "symbol",
-    desc: bool = False,
-) -> dict:
+def canonicalize_screener_query(where: str | None, order_by: str = "symbol") -> dict:
     """Normalize a screener query into the form used for the cache key and the
-    upstream fetch. `limit`/`offset` are deliberately excluded: the fetch always
-    pulls the top-200 rows for this key, and the caller's requested `limit` and
-    `offset` are applied by slicing the cached rows locally.
+    upstream fetch.
 
-    See sectors_idx_ingest_cache_plan_md.md section 3, steps 1-6.
+    `where` is Sectors' own SQL-like condition string (e.g.
+    "sector='Financials' and market_cap>1000000000000") — confirmed live against the
+    real API (data/sectors_client.py). It is only whitespace-normalized here, not
+    reordered or case-folded: lowercasing or reordering clauses on a live SQL-like
+    string risks changing what a quoted string literal matches or breaking operator
+    precedence, which the earlier dict-based design didn't have to worry about but
+    could silently corrupt query semantics here. This trades away some cache-hit-rate
+    optimization from unifying equivalent clauses (e.g. differing only in clause
+    order) — a real SQL-like parser/normalizer is a TODO if that turns out to matter.
+
+    `order_by` keeps Sectors' own "-field" convention for descending. `limit`/`offset`
+    are deliberately excluded: the fetch always pulls the top-200 rows for this key,
+    and the caller's requested `limit`/`offset` are applied by slicing the cached rows
+    locally.
     """
-    if isinstance(where, dict):
-        where_clause = _canonicalize_clause({"and": [
-            {"field": k, "op": "eq", "value": v} for k, v in where.items()
-        ]})
-    else:
-        where_clause = _canonicalize_clause({"and": where})
-
     return {
-        "where": where_clause,
-        "order_by": order_by.lower(),
-        "desc": desc,
-        "include_query_values": True,
+        "where": " ".join((where or "").split()),
+        "order_by": order_by.strip(),
     }
