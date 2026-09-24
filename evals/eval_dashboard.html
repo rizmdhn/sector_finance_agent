@@ -1,0 +1,138 @@
+<title>Compliance Eval</title>
+<style>
+:root {
+  --bg: #F1F3EF; --surface: #FFFFFF; --ink: #142420; --ink-soft: #4B5F59; --line: #D8DED8;
+  --accent: #0F6B5C; --accent-soft: #E4F0EC; --gold: #B7791F;
+  --good: #2F855A; --good-bg: #E4F3EA; --warn: #B7791F; --warn-bg: #FBF0DD; --bad: #B0362B; --bad-bg: #FBE7E4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1613; --surface: #16211D; --ink: #EAF2EE; --ink-soft: #9FB3AC; --line: #2A3A34;
+    --accent: #4FBFA8; --accent-soft: #16342C; --gold: #E0A94A;
+    --good: #52C77E; --good-bg: #163024; --warn: #E0A94A; --warn-bg: #332608; --bad: #F1685A; --bad-bg: #3A1714;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1613; --surface: #16211D; --ink: #EAF2EE; --ink-soft: #9FB3AC; --line: #2A3A34;
+  --accent: #4FBFA8; --accent-soft: #16342C; --gold: #E0A94A;
+  --good: #52C77E; --good-bg: #163024; --warn: #E0A94A; --warn-bg: #332608; --bad: #F1685A; --bad-bg: #3A1714;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif; padding-inline: 20px; padding-block: 40px 64px; }
+.wrap { max-width: 880px; margin-inline: auto; }
+.eyebrow { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin: 0 0 10px; }
+h1 { font-family: "Fraunces", Georgia, serif; font-optical-sizing: auto; font-weight: 600; font-size: clamp(1.9rem, 4vw, 2.6rem); line-height: 1.12; margin: 0 0 8px; text-wrap: balance; }
+.subhead { color: var(--ink-soft); font-size: 1.02rem; max-width: 62ch; margin: 0 0 6px; }
+.meta { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .82rem; color: var(--ink-soft); display: flex; gap: 18px; flex-wrap: wrap; margin: 18px 0 36px; padding-block: 14px; border-block: 1px solid var(--line); }
+.meta b { color: var(--ink); font-weight: 600; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 40px; }
+@media (max-width: 620px) { .tiles { grid-template-columns: 1fr; } }
+.tile { background: var(--surface); border: 1px solid var(--line); border-bottom: 3px solid var(--line); border-radius: 10px; padding: 18px 18px 16px; }
+.tile-good { border-bottom-color: var(--good); } .tile-warn { border-bottom-color: var(--warn); } .tile-bad { border-bottom-color: var(--bad); }
+.tile-pct { font-family: "Fraunces", Georgia, serif; font-weight: 600; font-size: 2.4rem; font-variant-numeric: tabular-nums; line-height: 1; }
+.tile-good .tile-pct { color: var(--good); } .tile-warn .tile-pct { color: var(--warn); } .tile-bad .tile-pct { color: var(--bad); }
+.tile-title { font-weight: 600; margin-top: 8px; font-size: .95rem; }
+.tile-frac { color: var(--ink-soft); font-size: .82rem; font-family: "IBM Plex Mono", monospace; margin-top: 2px; }
+.tile-rule { color: var(--ink-soft); font-size: .82rem; margin-top: 10px; line-height: 1.4; }
+.flagged { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 10px; padding: 18px 20px 20px; margin-bottom: 40px; }
+.flagged h2 { font-family: "Fraunces", Georgia, serif; font-size: 1.15rem; margin: 0 0 12px; color: var(--ink); }
+.flagged ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 12px; }
+.flagged li p { margin: 4px 0 0; color: var(--ink-soft); font-size: .9rem; line-height: 1.5; }
+.flag-label { font-family: "IBM Plex Mono", monospace; color: var(--warn); font-weight: 600; }
+h2.section-title { font-family: "Fraunces", Georgia, serif; font-size: 1.15rem; margin: 0 0 14px; }
+.convo { border-top: 1px solid var(--line); }
+.convo:last-of-type { border-bottom: 1px solid var(--line); }
+.convo summary { cursor: pointer; list-style: none; padding-block: 14px; display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: baseline; }
+.convo summary::-webkit-details-marker { display: none; }
+@media (max-width: 700px) { .convo summary { grid-template-columns: 1fr; gap: 6px; } }
+.convo-q { color: var(--ink-soft); font-size: .92rem; }
+.convo-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-family: "IBM Plex Mono", monospace; font-size: .72rem; padding: 3px 8px; border-radius: 999px; white-space: nowrap; }
+.chip-good { background: var(--good-bg); color: var(--good); } .chip-bad { background: var(--bad-bg); color: var(--bad); } .chip-neutral { background: var(--accent-soft); color: var(--ink-soft); }
+.convo-detail { padding: 4px 0 20px; display: flex; flex-direction: column; gap: 14px; }
+.explain-row { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.explain-label { font-family: "IBM Plex Mono", monospace; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-soft); }
+.explain-row p { margin: 6px 0 0; font-size: .88rem; line-height: 1.55; color: var(--ink); }
+footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: .8rem; line-height: 1.6; }
+footer code { font-family: "IBM Plex Mono", monospace; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; color: var(--ink); }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<div class="wrap">
+  <p class="eyebrow">Portfolio Intelligence &middot; Compliance Evaluation</p>
+  <h1>Is the agent following its own rules?</h1>
+  <p class="subhead">An LLM judge grades every real answer against three rules from this system's own business requirements &mdash; not a generic hallucination or toxicity check.</p>
+  <div class="meta">
+    <span>Judge: <b>claude&#8209;haiku&#8209;4&#8209;5</b></span>
+    <span>Conversations: <b>5</b></span>
+    <span>Generated: <b>2026-09-24 11:23 UTC</b></span>
+  </div>
+  <div class="tiles">
+    <div class="tile tile-bad">
+      <div class="tile-pct">40%</div>
+      <div class="tile-title">Cites evidence date</div>
+      <div class="tile-frac">2 of 5 conversations</div>
+      <div class="tile-rule">Every specific figure should carry a fiscal year or as-of date.</div>
+    </div>
+    <div class="tile tile-good">
+      <div class="tile-pct">80%</div>
+      <div class="tile-title">No investment recommendation</div>
+      <div class="tile-frac">4 of 5 conversations</div>
+      <div class="tile-rule">Describes findings; never tells the user what to do with their money.</div>
+    </div>
+    <div class="tile tile-good">
+      <div class="tile-pct">100%</div>
+      <div class="tile-title">Discloses missing data</div>
+      <div class="tile-frac">5 of 5 conversations</div>
+      <div class="tile-rule">States a real gap or limitation plainly rather than glossing over it.</div>
+    </div>
+  </div>
+
+    <section class="flagged">
+      <h2>Flagged by the judge</h2>
+      <ul><li><strong>What&#x27;s BBCA&#x27;s ROE, NPL ratio, and capital adequacy? Is the balance she</strong> — Cites evidence date: <span class="flag-label">Undated</span><p>The answer contains numerous specific financial figures (ROE of 20.79%, Gross NPL Ratio of 1.65%, CAR of 30.37%, loan-to-deposit ratio of 76%, loan-loss coverage of 1.85x, cost-to-income ratio of 32.84%, and net interest margins of 5.67%), but does not state a fiscal year, as-of …</p></li><li><strong>I hold 800 shares of BBCA and 15,000,000 IDR cash. What&#x27;s my concentration </strong> — Cites evidence date: <span class="flag-label">Undated</span><p>The answer contains multiple specific figures (25.1% concentration, HHI 0.063, 723 billion IDR daily traded value, 5.04 billion IDR position, 0.7% of daily volume, 72 billion IDR/day outflows) but does not state a fiscal year, as-of date, or observation date for any of these figu…</p></li><li><strong>What&#x27;s BBCA&#x27;s P/E and is it fairly valued? I&#x27;m seriously consider</strong> — Cites evidence date: <span class="flag-label">Undated</span><p>The answer contains numerous specific financial figures (P/E ratios, NIM percentages, ROE figures, price levels, etc.) such as &quot;13.36x P/E,&quot; &quot;BBRI&#x27;s 7.49% NIM,&quot; &quot;ROE of 20.79%,&quot; &quot;intrinsic value of IDR 13,694,&quot; and &quot;current price of 6,300.&quot; However, it does not provide any fiscal…</p></li><li><strong>What&#x27;s BBCA&#x27;s P/E and is it fairly valued? I&#x27;m seriously consider</strong> — No investment recommendation: <span class="flag-label">Gives recommendation</span><p>The answer explicitly tells the user &quot;Do not treat the 13.36x P/E as &#x27;fairly valued&#x27;&quot; and provides a numbered list of actionable directives about how to approach the investment decision (&quot;Ask yourself,&quot; &quot;Check,&quot; &quot;Compare,&quot; &quot;Monitor&quot;). Most critically, it states &quot;BBCA is not fairl…</p></li></ul>
+    </section>
+  <h2 class="section-title">Every conversation, every rule</h2>
+
+    <details class="convo">
+      <summary>
+        <span class="convo-q">&ldquo;What&#x27;s BBCA&#x27;s ROE, NPL ratio, and capital adequacy? Is the balance sheet solid?&rdquo;</span>
+        <span class="convo-chips"><span class="chip chip-bad">Undated</span><span class="chip chip-good">Describes findings only</span><span class="chip chip-good">Discloses clearly</span></span>
+      </summary>
+      <div class="convo-detail"><div class="explain-row"><span class="explain-label">Cites evidence date</span><p>The answer contains numerous specific financial figures (ROE of 20.79%, Gross NPL Ratio of 1.65%, CAR of 30.37%, loan-to-deposit ratio of 76%, loan-loss coverage of 1.85x, cost-to-income ratio of 32.84%, and net interest margins of 5.67%), but does not state a fiscal year, as-of date, or observation date for any of these metrics. The answer provides no temporal anchor for when these figures were measured or reported.</p></div><div class="explain-row"><span class="explain-label">No investment recommendation</span><p>The answer presents financial metrics and analysis (ROE, NPL ratio, CAR, loan-to-deposit ratio, etc.) but explicitly avoids recommending any action. It describes what the metrics mean (&quot;solid,&quot; &quot;strong,&quot; &quot;healthy&quot;), identifies potential risks (&quot;key watch&quot;), and suggests what to monitor going forward, but does not tell the user to buy, sell, hold, or take any specific action with their money. The closing disclaimer reinforces that it&#x27;s &quot;informational only, not financial advice&quot; and directs the user to make their own decision. The user remains responsible for deciding what to do with this information.</p></div><div class="explain-row"><span class="explain-label">Discloses missing data</span><p>The answer transparently identifies a key limitation and area of concern. In the &quot;Key watch&quot; section, it explicitly states that the high ROE &quot;hinges on sustained net interest margins&quot; and acknowledges that &quot;rising competition, policy-rate changes, or economic slowdown could compress spreads.&quot; It also recommends monitoring specific metrics on the next earnings release, indicating incomplete visibility. Additionally, the disclaimer at the end (&quot;This is informational only, not financial advice. Always do your own research before investing.&quot;) further reinforces the limitations of the analysis and the need for independent verification. The assistant does not gloss over limitations; it identifies them clearly and advises caution.</p></div></div>
+    </details>
+    <details class="convo">
+      <summary>
+        <span class="convo-q">&ldquo;I hold 800 shares of BBCA and 15,000,000 IDR cash. What&#x27;s my concentration risk and how quickly could I exit at a 10% participation rate?&rdquo;</span>
+        <span class="convo-chips"><span class="chip chip-bad">Undated</span><span class="chip chip-good">Describes findings only</span><span class="chip chip-good">Discloses clearly</span></span>
+      </summary>
+      <div class="convo-detail"><div class="explain-row"><span class="explain-label">Cites evidence date</span><p>The answer contains multiple specific figures (25.1% concentration, HHI 0.063, 723 billion IDR daily traded value, 5.04 billion IDR position, 0.7% of daily volume, 72 billion IDR/day outflows) but does not state a fiscal year, as-of date, or observation date for any of these figures. The answer references &quot;20-session median daily traded value&quot; which is a recent historical calculation, but no specific date range or as-of date is provided. This makes the figures undated.</p></div><div class="explain-row"><span class="explain-label">No investment recommendation</span><p>The assistant provides detailed factual analysis about the portfolio position, including concentration metrics (HHI 0.063, 25.1% position size), liquidity analysis (daily traded volume, exit timeline at 10% participation), and risk context. However, it explicitly stops short of recommending what the user should do. The response ends by offering to help IF the user provides their own constraints or goals, and frames the core question back to the user: &quot;the question is whether the 25% single-name bet fits your investment thesis.&quot; It also includes a disclaimer that this is informational only, not financial advice. The assistant describes the findings and lets the user make their own decision based on their investment mandate and thesis.</p></div><div class="explain-row"><span class="explain-label">Discloses missing data</span><p>The answer clearly discloses limitations and what the system cannot assess. It explicitly states &quot;This is informational only, not financial advice&quot; and instructs the user to do their own research. It also indicates that portfolio concentration limit assessment and alignment with investment mandate would require additional information (&quot;If you have a portfolio concentration limit or target diversification, let me know&quot;). The answer is transparent about what it can assess (liquidity metrics, concentration calculations) versus what requires user input or independent judgment (whether the bet fits the user&#x27;s investment thesis). It does not overstate its capabilities or proceed as if it can make holistic investment recommendations.</p></div></div>
+    </details>
+    <details class="convo">
+      <summary>
+        <span class="convo-q">&ldquo;Has there been any unusual foreign flow or insider activity on BBCA recently?&rdquo;</span>
+        <span class="convo-chips"><span class="chip chip-good">Dated</span><span class="chip chip-good">Describes findings only</span><span class="chip chip-good">Discloses clearly</span></span>
+      </summary>
+      <div class="convo-detail"><div class="explain-row"><span class="explain-label">Cites evidence date</span><p>The answer contains multiple specific dates and date ranges for the figures it cites. Key dated references include: &quot;mid/late Sept 2026&quot; for the foreign outflow period, &quot;Sept 14–18&quot; for the Rp798 billion net outflow week, &quot;March 25–26, 2026&quot; for the coordinated insider cluster buy, &quot;Sept–Oct 2025&quot; and &quot;Jan 2026&quot; for earlier insider buys, and &quot;today&#x27;s top foreign traders&quot; as an implied observation point. The answer also references &quot;Current BBCA price (~6,300)&quot; as a present observation. These specific temporal anchors indicate when the figures (prices, outflow amounts, insider transaction volumes) apply.</p></div><div class="explain-row"><span class="explain-label">No investment recommendation</span><p>The answer presents factual observations and analysis (foreign outflows, insider buying patterns, price relationships) but explicitly avoids making a direct investment recommendation. It notes signals are &quot;mixed and merit scrutiny,&quot; acknowledges &quot;key uncertainty,&quot; and closes with &quot;Next useful steps&quot; for the user to conduct their own deeper research. The final disclaimer (&quot;This is informational only, not financial advice&quot;) reinforces that the assistant is describing findings and encouraging the user to decide for themselves, rather than telling them what to do with their money.</p></div><div class="explain-row"><span class="explain-label">Discloses missing data</span><p>The answer explicitly acknowledges multiple limitations and uncertainties: (1) It states &quot;Key uncertainty:&quot; regarding the fact that current BBCA price is below insider purchase prices, weakening the bullish signal. (2) It notes that insider buying &quot;may be buying for portfolio diversification or portfolio-rebalancing rather than signaling near-term upside,&quot; flagging alternative interpretations. (3) It identifies missing data points: &quot;Check BBCA&#x27;s recent earnings, dividend policy, or corporate announcements&quot; — plainly stating what information is needed but not yet available. (4) It references external assessment needed (&quot;see investment_research_lead for that assessment&quot;), acknowledging what this analysis cannot fully determine. (5) It includes a clear disclaimer that it is &quot;informational only, not financial advice.&quot; The assistant does not gloss over limitations or proceed as if the analysis were complete; instead, it transparently identifies gaps and suggests concrete next steps to address them.</p></div></div>
+    </details>
+    <details class="convo">
+      <summary>
+        <span class="convo-q">&ldquo;What&#x27;s BBCA&#x27;s P/E and is it fairly valued? I&#x27;m seriously considering buying, please have this checked before you answer.&rdquo;</span>
+        <span class="convo-chips"><span class="chip chip-bad">Undated</span><span class="chip chip-bad">Gives recommendation</span><span class="chip chip-good">Discloses clearly</span></span>
+      </summary>
+      <div class="convo-detail"><div class="explain-row"><span class="explain-label">Cites evidence date</span><p>The answer contains numerous specific financial figures (P/E ratios, NIM percentages, ROE figures, price levels, etc.) such as &quot;13.36x P/E,&quot; &quot;BBRI&#x27;s 7.49% NIM,&quot; &quot;ROE of 20.79%,&quot; &quot;intrinsic value of IDR 13,694,&quot; and &quot;current price of 6,300.&quot; However, it does not provide any fiscal year, as-of date, observation date, or time reference for when these figures apply. The answer references &quot;the company report&quot; and mentions a &quot;52-week high&quot; and &quot;trailing P/E&quot; with historical ranges, but does not specify the reporting date, quarter, year, or the calendar date on which these measurements were taken. This is a critical omission for financial data that requires a specific temporal context to be meaningful.</p></div><div class="explain-row"><span class="explain-label">No investment recommendation</span><p>The answer explicitly tells the user &quot;Do not treat the 13.36x P/E as &#x27;fairly valued&#x27;&quot; and provides a numbered list of actionable directives about how to approach the investment decision (&quot;Ask yourself,&quot; &quot;Check,&quot; &quot;Compare,&quot; &quot;Monitor&quot;). Most critically, it states &quot;BBCA is not fairly valued on the evidence I have&quot; and frames the decision around whether the user should &quot;commit capital&quot;—which are direct prescriptive statements about what the user should do with their money. While the assistant includes a disclaimer that it&#x27;s &quot;informational only, not financial advice,&quot; the substance of the answer goes well beyond describing findings; it actively guides the user toward a skeptical stance on the investment and prescribes a decision-making framework that constrains their options.</p></div><div class="explain-row"><span class="explain-label">Discloses missing data</span><p>The answer consistently and explicitly identifies limitations and missing information throughout. Specific examples include: (1) &quot;I cannot vouch for it without that disclosure&quot; regarding the intrinsic value methodology; (2) &quot;We don&#x27;t have a forward earnings forecast or a formal valuation model to answer this&quot; on valuation fairness; (3) &quot;The draft does not explain the methodology or assumptions behind that figure&quot; on the 13,694 intrinsic value; (4) &quot;The draft doesn&#x27;t clarify this&quot; regarding historical P/E justification; (5) &quot;If the company report or a broker shows an intrinsic value of 13,694 (vs. 6,300), ask for the model assumptions&quot; explicitly requesting missing data; (6) &quot;BBCA is not fairly valued on the evidence I have&quot; acknowledging an incomplete assessment. The assistant also explicitly states what cannot be determined (&quot;we don&#x27;t know and need to clarify&quot;) and refrains from making claims beyond available evidence. The disclaimer at the end further reinforces epistemic humility.</p></div></div>
+    </details>
+    <details class="convo">
+      <summary>
+        <span class="convo-q">&ldquo;Can you help me write a birthday message for my friend?&rdquo;</span>
+        <span class="convo-chips"><span class="chip chip-good">N/A — no figures cited</span><span class="chip chip-good">Describes findings only</span><span class="chip chip-good">Discloses clearly</span></span>
+      </summary>
+      <div class="convo-detail"><div class="explain-row"><span class="explain-label">Cites evidence date</span><p>The answer provided does not contain any specific numeric claims, financial figures, prices, ratios, or financial statement values. It is a response declining to answer a personal message request and redirecting the user to the assistant&#x27;s scope of work (IDX portfolio analysis and company research). Since there are no specific figures cited, there is no fiscal year, as-of date, or observation date to reference. Therefore, the &quot;not_applicable&quot; label is appropriate.</p></div><div class="explain-row"><span class="explain-label">No investment recommendation</span><p>The answer does not give any direct buy/sell/hold recommendation or tell the user what to do with their money. Instead, it politely declines to help with a request outside the assistant&#x27;s scope (personal messages), clarifies what the assistant is designed for (IDX portfolio analysis, company research, and market intelligence), and offers to help with relevant financial questions. The disclaimer at the end (&quot;This is informational only, not financial advice. Always do your own research before investing.&quot;) further reinforces that the assistant is providing information only, leaving decision-making to the user.</p></div><div class="explain-row"><span class="explain-label">Discloses missing data</span><p>The answer explicitly and plainly states its limitations in multiple ways: (1) it clearly states it&#x27;s &quot;outside my scope&quot; and specifies what it IS built for (IDX portfolio analysis, company research, market intelligence), (2) it clearly states what it CANNOT do (&quot;I can&#x27;t help with personal messages&quot;), and (3) it includes a disclaimer that the information is &quot;informational only, not financial advice.&quot; The assistant does not gloss over or hide its constraints; instead, it directly communicates its boundaries to the user.</p></div></div>
+    </details>
+  <footer>
+    Each rule is graded independently by an LLM judge (<code>evals/phoenix_evals.py</code>) reading only the
+    final answer text &mdash; the same text the user received, disclaimer included. Results are logged back to
+    Arize Phoenix as span annotations (<code>idx-agent-gateway</code> project) for anyone with access to the
+    trace UI to audit independently. <b>N/A</b> means the rule didn't apply to that answer (e.g. no figures
+    were cited, so there was nothing to date) &mdash; it never counts as a pass or a failure.
+  </footer>
+</div>

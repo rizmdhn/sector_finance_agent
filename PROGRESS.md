@@ -708,9 +708,718 @@ auto-tag. 2 new tests (`test_add_auto_tags_kind_in_metadata`,
 **Not done**: no UI decided yet, so there's no confirmed source for a session id
 other than the gateway's own `X-Session-Id` header scheme built here — a real chat
 UI's own conversation-id convention, once one is chosen, may fit more naturally than
-asking the UI to echo a header. Portfolio Risk Lead still doesn't exist, so a
-recalled portfolio position still can't be checked against a recalled mandate limit
-end to end — memory can retrieve both facts, but nothing computes with them yet.
+asking the UI to echo a header.
+
+## Item 17: Portfolio Risk Lead — third role wired in (2026-09-24)
+
+`gateway/roles/portfolio_risk.py` (new): third specialist, attached to the Chief as
+an agent-as-tool exactly like Investment Research Lead (same `preserve_context=False`
+boundary — no session/memory of its own). Reuses the existing
+`analyze_portfolio`/`analyze_liquidity`/`analyze_returns` tools
+(`gateway/tools/portfolio_analysis.py`), which were already wired to real ingested
+Postgres data in an earlier session but had no role consuming them yet — the Chief
+previously withheld them entirely rather than expose them through a role boundary
+they didn't belong to (see the old orchestrator.py docstring, now superseded).
+
+Covers, per the business doc: exposure/weight/concentration (HHI, effective number
+of holdings) and single-position liquidity (ADV20, normal-conditions exit days).
+Explicitly does NOT cover (system prompt says so rather than fabricating it):
+covariance between holdings, portfolio-level volatility/VaR, stress-test/scenario
+analysis, benchmark comparison, or checking a weight against the user's actual
+mandate limits — this role has no access to the Chief's memory, so mandate-limit
+comparison is the Chief's job (pairing a recalled limit from `search_memory` against
+this role's exposure numbers), not this role's.
+
+`gateway/roles/orchestrator.py`: updated to list both specialists, updated the
+memory/rules sections accordingly, and wired `portfolio_risk_lead.as_tool(...)` in
+next to `investment_research_lead.as_tool(...)`. Zero Sectors API credit cost added —
+`analyze_portfolio`/`analyze_liquidity`/`analyze_returns` only read already-ingested
+Postgres data, never call `SectorsClient` (see data/analysis_bridge.py).
+
+Verified structurally (no LLM call, avoiding spend): built a real `Agent` via
+`build_agent()` against real Postgres/Valkey and confirmed `agent.tool_names ==
+['investment_research_lead', 'portfolio_risk_lead', 'search_memory', 'add_memory']`.
+72/72 existing tests still pass (no test changes needed — the new role has no I/O
+of its own beyond tools already covered by `data/tests/test_analysis_bridge.py`).
+
+**Live-tested (2026-09-24, Haiku, 2 real conversations, real Postgres data — BBCA
+only, 21 ingested sessions)**:
+1. "I hold 500 shares of BBCA and have 10,000,000 IDR cash. What is my
+   concentration risk and can I exit normally?" — Chief correctly delegated to
+   `portfolio_risk_lead`, which called `analyze_portfolio` then `analyze_liquidity`
+   in sequence and reported real numbers (24.0% weight, ADV20 ≈ IDR 723B, exit
+   time ≈ instant at 10% participation). Correctly separated "concentration risk"
+   from "liquidity risk" as different problems, matching the system prompt's rule,
+   and ended by asking for the user's actual mandate limit rather than assuming one.
+   **Real finding, not a bug in this session's work**: `analyze_portfolio`'s HHI/
+   effective-number-of-holdings is computed only over priced positions' weights,
+   which don't sum to 1 when cash is present — with a single 24%-weight holding
+   this produces a HHI (0.0574) and effective-holdings (~17.4) that read like a
+   diversified book. The model itself caveated this ("though we only see one
+   position in this query") and didn't let it drive the bottom line, but the
+   underlying `analysis/portfolio.py` metric is misleading on a thin portfolio.
+   Pre-existing from an earlier session, not introduced here — flagged, not fixed.
+2. "If the rupiah depreciates 10%, how much would my BBCA position lose, and does
+   my portfolio breach my mandate?" — correctly called `search_memory` first (found
+   nothing, since this session's test user never stored anything), then declined
+   the stress-test and mandate-breach parts explicitly ("this system does not yet
+   have stress-test/scenario analysis capability"), and asked for positions/mandate
+   limits rather than guessing at either. No fabricated numbers.
+
+## Item 18: Market and Event Intelligence Lead + Independent Risk and Evidence
+Officer — all five business-doc roles now wired in (2026-09-24)
+
+User asked to "make all the agents" after Portfolio Risk Lead. Built the remaining
+two.
+
+**Market and Event Intelligence Lead** (`gateway/roles/market_intelligence.py`,
+`gateway/tools/market_intelligence.py`, `data/repositories.py` additions): price/
+volume moves (reuses `get_price_history`), plus four endpoints not previously
+exposed to any agent — `get_corporate_actions`, `get_filings`, `get_news`,
+`get_foreign_flow` — and `get_broker_activity` (a repository function that already
+existed from an earlier session but had no tool/role consuming it yet). New CACHE
+wrapper in `data/repositories.py` with a flat 1-hour TTL for the four event
+endpoints — no epoch/change-detector exists for these the way price_epoch/fund_epoch
+do for prices and financials, so a flat TTL is a deliberate compromise (documented
+in the code) rather than an assumed-correct number. Two honest limits stated in the
+system prompt rather than glossed over: no statistical baseline exists for judging a
+move "unusual" (no volatility model — the role describes moves in plain terms, never
+a fabricated z-score), and the symbol/date filter parameters on these four endpoints
+are UNCONFIRMED to actually filter (data/sectors_client.py's own docstring already
+flagged this; the role's system prompt tells it to sanity-check a "filtered" result
+before trusting it's actually scoped).
+
+**Independent Risk and Evidence Officer** (`gateway/roles/independent_risk_officer.py`):
+reviews a draft answer's evidence and calculations rather than originating analysis
+itself — has the full toolset (company report, price history, fundamentals/
+valuation, portfolio/liquidity/returns, all four market-intelligence tools) so it
+can actually reproduce a specialist's number rather than trust it on the strength of
+confident phrasing. Returns one of PASS / PASS WITH LIMITATIONS / REVISE / DATA
+BLOCKED / HUMAN ESCALATION per the business doc's table. Deliberately NOT called on
+every question — it re-runs tool calls plus its own model call on top of whatever a
+specialist already did, so the Chief's system prompt invokes it selectively
+(material quantitative claims the user might act on financially), documented as a
+real trade-off: a question this role would have caught but the Chief didn't route to
+it gets no independent review. The business doc's "cannot be overruled by another
+agent" requirement is enforced as an explicit Chief-side rule (REVISE/DATA BLOCKED
+must change the presented answer; HUMAN ESCALATION must reach the user explicitly)
+rather than a technical guarantee — there is no mechanism stopping the Chief from
+ignoring this, same limitation any prompt-level rule has.
+
+`gateway/roles/orchestrator.py`: rewritten to list and route to all four
+specialists, with the "material claim → call the reviewer" and "reviewer's decision
+cannot be softened" rules added explicitly.
+
+Verified structurally only (no LLM calls, zero spend): built the Chief and confirmed
+`agent.tool_names == ['investment_research_lead', 'portfolio_risk_lead',
+'market_and_event_intelligence_lead', 'independent_risk_and_evidence_officer',
+'search_memory', 'add_memory']`; built each new specialist standalone and confirmed
+its tool list matches what its system prompt claims. 72/72 existing tests still
+pass unchanged.
+
+**Not done / open**:
+- The Independent Risk and Evidence Officer has never actually been exercised
+  end-to-end (does the Chief actually invoke it when it should, does a REVISE
+  verdict actually change the presented answer) — prompt-level design only so far.
+- Per-role model tiering (cheap model for the Chief's routine coordination, a more
+  capable model reserved for the reviewer or difficult conflicts) is still not
+  implemented — all five roles share one model_entry.
+
+## Item 19: Market and Event Intelligence Lead — live-tested, 1 real bug found and
+fixed, 1 prompt gap found and fixed (2026-09-24)
+
+User asked to live-test Market and Event Intelligence Lead specifically including
+`get_news`, "cheap." Two real findings from 2 live Haiku conversations against real
+BBCA data (not from direct probing — from watching what an actual agent conversation
+did, then confirmed via the Phoenix trace of the failing tool call):
+
+1. **`get_news(symbol=...)` genuinely 400s**, confirmed via the real error message
+   captured in the trace: `Unsupported query parameter(s): symbol. Allowed:
+   commodity_type, end, extension, keyword, limit, offset, sector, start,
+   sub_sector, symbols, tags.` — the real parameter is `symbols` (plural). This is
+   the opposite of what data/sectors_client.py's docstring had warned about (an
+   unrecognized param being silently ignored, returning unfiltered results); this
+   endpoint hard-errors instead. **Fixed**: `SectorsClient.get_news` now sends
+   `symbols=` instead of `symbol=`, verified against the real API — a direct call
+   for BBCA returned 20 real, BBCA-specific news items (dividend increases, August
+   2026 profit figures, foreign-flow data, analyst targets). The market_intelligence
+   Lead's own system prompt had already told the model to treat a `get_news` error
+   honestly rather than fabricate news around it — confirmed live: before the fix,
+   the model correctly reported "the news endpoint returned an error for
+   symbol-filtered queries... I cannot provide symbol-specific news" instead of
+   inventing anything.
+   Also confirmed as a side effect: `get_filings(symbol=...)` and
+   `get_corporate_actions(symbol=...)` DO filter correctly — a live BBCA query
+   returned genuinely BBCA-specific insider-filing and AGM/dividend data, not an
+   unfiltered dump. Documented both findings in data/sectors_client.py.
+2. **Prompt gap, not a data bug**: with `get_news` fixed, a second live call showed
+   `market_and_event_intelligence_lead`'s own answer stayed properly hedged ("likely
+   linked to," phrased as unconfirmed), but the Chief's own synthesis on top of it
+   dropped that hedging — stated "reflects broader risk-off sentiment... rather than
+   company-specific issues" and "signaling insider belief in long-term value" as
+   settled fact. The specialist's system prompt already has an explicit
+   observation-vs-explanation separation rule (business doc: "Does not infer intent
+   or causality from trading patterns alone"); the Chief's own prompt had no
+   equivalent, so nothing stopped it from tightening a hedge into a claim during
+   synthesis. **Fixed**: added a rule to the Chief's SYSTEM_PROMPT
+   (gateway/roles/orchestrator.py) to preserve a specialist's hedges rather than
+   presenting them as settled, specifically for causal claims built from news/flow/
+   insider-filing data. Not re-verified live after this specific edit (prompt-only
+   change, structural build still passes) — first real test of the new rule will be
+   whatever the next live market-intelligence conversation is.
+
+All 72 tests still pass (no test file changes — this was a live/manual
+verification, matching how item 17's Portfolio Risk Lead check was also done).
+
+**Still open**: Independent Risk and Evidence Officer still has zero live testing.
+`get_corporate_actions_calendar`/`get_suspensions`/`get_top_brokers_daily`/
+`get_foreign_flow_daily`'s filter params remain unconfirmed (only `filings`/
+`corporate_actions`/`news` were checked this round). Real Sectors credit cost of
+the four event endpoints is still unmeasured — these calls happened but no
+before/after credit count was taken; if that number matters, check the Sectors
+dashboard directly rather than assuming from this session's notes.
+
+## Item 20: Concurrent-tool-call race on `.as_tool()`-wrapped specialists — found
+live, fixed (2026-09-24)
+
+The item 19 re-test (Chief hedging rule) surfaced a second, separate real bug: the
+run's very first line of output was a warning — `tool_name=<
+market_and_event_intelligence_lead>, tool_use_id=<...> | agent is already
+processing a request`.
+
+**Root cause, confirmed by reading Strands' own source** (not guessed):
+`.as_tool()` wraps ONE shared `Agent` instance per specialist — built once in
+`build_agent()`, reused for every call the Chief makes to it within a conversation.
+`strands/agent/agent.py` defaults every `Agent` to a `ConcurrentToolExecutor`
+(`strands/tools/executors/concurrent.py`), which runs every tool call requested in
+one LLM turn in parallel. `strands/agent/_agent_as_tool.py` guards the wrapped
+sub-agent with a non-blocking lock specifically because a concurrent call would
+"corrupt an in-flight invocation" (its own comment) — so when the Chief happened to
+request two parallel calls to the *same* specialist in one turn, the second one hit
+the lock and got back a hard `"error"` tool result instead of data. The model
+recovered by retrying in this instance, but nothing guarantees that: an LLM that
+doesn't retry would silently drop that piece of data rather than surfacing an
+error to the user — a real, if intermittent, correctness risk.
+
+**Fixed**: `gateway/roles/orchestrator.py` now builds the Chief with
+`tool_executor=SequentialToolExecutor()` (`strands.tools.executors`), scoped to the
+Chief only — its tools include other wrapped Agents, which are not reentrant.
+Deliberately NOT applied to any specialist's own `Agent` build: a specialist's own
+tools (e.g. market_and_event_intelligence_lead calling `get_news`/`get_filings`/
+`get_corporate_actions` together) are plain function tools with no shared-instance
+lock, so concurrent execution there is safe and keeps the latency benefit. Trade-off
+of the fix: the Chief now never runs two *different* specialists in parallel either
+(some added wall-clock latency on questions that touch multiple specialists), but
+no added credit cost — the same calls happen either way, and this now also avoids
+the wasted failed-then-retried round trip the bug caused.
+
+**Verified**: re-ran the exact conversation that triggered the original warning
+("What's going on with BBCA's insider buying and foreign flow lately? Does it mean
+anything?") — no warning this time, `agent.tool_executor` confirmed as
+`SequentialToolExecutor` via a structural check, and the answer came back complete,
+well-hedged, and even better organized than the pre-fix run (an explicit
+"Observations vs. Hypotheses" section). 72/72 tests still pass.
+
+## Item 21: Event-data endpoints now persist to Postgres, not just Valkey
+(2026-09-24)
+
+User noticed live: a real Sectors API call for news during item 19/20 testing never
+showed up in Postgres, unlike every other real data source in this project
+(price_daily, broker_activity, user_memory). Asked whether that should change; chose
+"persist to Postgres too" over "leave as Valkey-only cache."
+
+**What changed**: `get_corporate_actions`, `get_filings`, `get_news`, and
+`get_foreign_flow` in `data/repositories.py` now write to Postgres on every REAL
+fetch (a Valkey cache miss only — a cache hit still writes nothing new, so this adds
+zero Sectors credit cost). They reuse tables that already existed in
+`data/schema.sql` (`corporate_actions`, `filings`, `news_articles`,
+`foreign_flow_daily`) and upsert/insert methods that already existed in `data/db.py`
+(`upsert_corporate_actions`, `upsert_filings`, `upsert_news_articles`,
+`upsert_foreign_flow`) — both were built in an earlier session for a planned bulk
+INGEST job that was never finished, and had zero writers until now. Valkey's 1-hour
+TTL stays as the "is this still fresh enough to serve" layer; Postgres is now the
+durable audit trail — real for the Independent Risk and Evidence Officer's job to
+"follow a material claim back to its source" (business doc), which a TTL-expired
+Valkey key can no longer do.
+
+Four new row-builder functions (`_corporate_action_rows`, `_filing_rows`,
+`_news_rows`, `_foreign_flow_rows`) map each endpoint's real response shape
+(confirmed live, not guessed — captured actual BBCA payloads before writing the
+mapping) onto each table's row schema:
+- Corporate actions: the API nests by type (`{"corporate_actions": {"agm": [...],
+  "dividend": [...], "stock_split": [...], ...}}`) — flattened to one row per item,
+  with the date field name varying by type (`ex_date` for dividends, `date` for
+  splits, `agm_date` for AGMs).
+- News: one real article can cover multiple symbols (`"symbols": ["BBCA.JK",
+  "CDIA.JK"]`, confirmed live) — stored as one row per covered symbol so a later
+  per-symbol query finds it. `extension` (NOT NULL in the schema, a field from an
+  unfinished original ingest design with no equivalent in the real response) is set
+  to a constant `"idx"`.
+- Foreign flow: confirmed (again) this is a market-wide top-N feed, not
+  symbol-filterable — every persisted row covers whatever symbols the API chose to
+  return for that date, not necessarily the one a caller asked about.
+
+**Verified end to end, live** (each of these forced exactly one real Sectors API
+call, deliberately, to prove the write path — not exploratory): corporate actions
+for BBCA went from 0 rows to 25 in Postgres after one fetch (dividends, AGMs, the
+2021 stock split, all correctly dated); filings went to 10 rows; news_articles to
+20 rows; foreign_flow_daily to 20 rows. The four row-builder functions were also
+checked directly against the exact real payload shapes captured during this
+verification (pure-function checks, no additional API cost). 72/72 existing tests
+still pass; structural agent build unaffected.
+
+**Not done**: no automated test file covers the new persistence path (verified
+manually/live this round, matching how items 17/19/20 were also verified). No
+retention/pruning policy exists for these audit tables — they will grow unbounded
+as an append-mostly log; `filings`/`news_articles` have no unique constraint, so a
+repeated real fetch of overlapping data (e.g. two different symbol queries that both
+surface the same article) will insert duplicate rows rather than deduping. Not a
+correctness problem for an audit trail, but worth knowing if row count ever matters.
+
+## Item 22: Portfolio Risk Lead re-verified after items 20/21; Independent Risk and
+Evidence Officer live-tested for the first time (2026-09-24)
+
+**Portfolio Risk Lead re-check**: re-ran a concentration+liquidity question
+("1000 shares BBCA + 20,000,000 IDR cash... exit at 5% participation") after the
+SequentialToolExecutor fix (item 20) and the market-intelligence persistence change
+(item 21), to confirm neither broke this role. Clean run, no concurrency warning,
+correct numbers (23.95% weight, HHI 0.057, ~15-second exit). Notably better
+interpretation than item 17's original test: the model now explicitly self-corrects
+the low-blended-HHI-looks-diversified read ("though equity concentration would be
+high if you were fully invested") without being told to this time — either a model
+variance or the earlier finding sinking in through session context; not something
+this session's prompt changes specifically targeted, so treat as encouraging rather
+than confirmed-fixed.
+
+**Independent Risk and Evidence Officer — first live test.** Asked a deliberately
+material question ("BBCA P/E and ROE, is it reasonably valued, I'm seriously
+considering buying, please have this checked"). Full pipeline worked exactly as
+designed:
+1. Chief routed to investment_research_lead first for the draft valuation.
+2. Chief then explicitly called independent_risk_and_evidence_officer before
+   presenting anything — the "material claim" rule in its system prompt fired
+   correctly on real judgment, not a forced instruction.
+3. The reviewer didn't just re-read the draft — it re-ran analyze_fundamentals,
+   get_price_history, get_company_report, get_corporate_actions, and
+   analyze_returns itself and verified every numeric claim to the decimal (P/E
+   13.4x, ROE 20.8%, NIM 5.67%, NPL 1.65%, etc. all confirmed).
+4. It found three genuine analytical gaps the draft had glossed over: an
+   unsupported "9-10% cost of equity" figure with no disclosed calculation, a
+   "low-growth (3.4%)" narrative that omitted net income actually grew 4.9% YoY,
+   and no mention of a 38% P/E compression (21.5x -> 13.2x) over two years.
+5. Returned **REVISE**. Per the Chief's system prompt rule, it did NOT present the
+   original conclusion — it rebuilt the answer around the corrected picture and
+   told the user it cannot recommend buy/sell because the call now depends on the
+   user's own cost-of-capital assumption, which the research never made explicit.
+
+One non-bug worth noting: the reviewer's own tool calls included one real 400 —
+it guessed invalid `get_company_report` section names ("balance sheet", "income
+statement", "bank metrics" — not real sections; the confirmed real list is
+overview/valuation/future/peers/financials/dividend/management/ownership, see
+data/repositories.py). The tool correctly rejected it and the model recovered by
+retrying with valid sections on its next call — graceful degradation working as
+intended, not a code defect.
+
+Cost: 11 model calls, ~22.7k total tokens for this one conversation (all Haiku) —
+no dollar figure given, since no confirmed Haiku $/token rate is documented in this
+project to convert against honestly.
+
+**Not done**: this was one conversation, one question shape (a valuation claim).
+Whether the Chief reliably calls the reviewer for OTHER kinds of material claims
+(a portfolio-risk conclusion, a market-intelligence causal claim) is still
+unverified — the "call it selectively" rule is a judgment call by the model each
+time, not a hard trigger, so it could just as easily be skipped on a similar-looking
+question. Whether the Chief correctly handles a PASS, DATA BLOCKED, or HUMAN
+ESCALATION verdict (as opposed to REVISE) is also still unverified — only REVISE
+has been observed live so far.
+
+## Item 23: Per-agent token/turn caps + off-topic guard, so a runaway loop or an
+off-scope question can't quietly burn credit (2026-09-24)
+
+User asked for two things: a hard limit/guardrail per tool against "leaking" (e.g.
+retry loops with no cap), and a way to avoid spending tokens on non-finance
+questions outside this system's scope.
+
+**Guardrail 1: per-agent Limits cap.** Strands has a native mechanism for exactly
+this — `strands.types.agent.Limits` (`turns`, `output_tokens`, `total_tokens`),
+checked at turn boundaries; when tripped, the loop ends gracefully
+(`stop_reason="limit_turns"`/`"limit_total_tokens"`, no exception) rather than
+erroring or corrupting state. But it's a per-CALL kwarg to `agent(...)`/
+`stream_async(...)`, not something settable once on an Agent — and confirmed by
+reading `strands/agent/_agent_as_tool.py`: `.as_tool()` calls the wrapped
+specialist's `stream_async(prompt, cancel_signal=cancel_signal)` directly, without
+forwarding a `limits` kwarg at all. So every specialist in this project (all
+wrapped via `.as_tool()` — gateway/roles/orchestrator.py) would have had NO cap of
+its own; the Chief's own limits only bound the Chief's loop, and "call a
+specialist" counts as a single Chief turn no matter how long that specialist runs
+internally.
+
+**Fixed with `gateway/bounded_agent.py`'s `BoundedAgent(Agent)`**: overrides only
+`stream_async` to fall back to a stored `default_limits` whenever the caller didn't
+pass one explicitly — confirmed via reading `Agent.__call__`/`invoke_async`, both
+internally call `self.stream_async(...)`, so this one override transparently covers
+every entry point (`agent(...)`, `invoke_async`, `stream_async`, and `.as_tool()`'s
+direct call) via normal polymorphism. Never tightens or loosens an explicit
+caller-supplied `limits` — only fills the gap when nothing was supplied.
+
+Every role now builds a `BoundedAgent` instead of a plain `Agent`, with a cap sized
+generously above what live testing has actually shown (items 17/19/20/22), as a
+backstop rather than a normal-use budget:
+- investment_research_lead: turns=8, total_tokens=80,000 (observed: 2-3 tool calls)
+- portfolio_risk_lead: turns=6, total_tokens=60,000 (observed: 2-4 tool calls)
+- market_and_event_intelligence_lead: turns=10, total_tokens=100,000 (observed: 4-5)
+- independent_risk_and_evidence_officer: turns=16, total_tokens=180,000 (observed: 6
+  tool calls in its first live test — the most tool-heavy role by design)
+- Chief: turns=40, total_tokens=400,000 (observed: 11 model calls / ~22.7k tokens
+  for one multi-specialist conversation in item 22)
+
+**Verified the cap actually engages at runtime**, not just structurally: built a
+throwaway `BoundedAgent` with `turns=1` and a system prompt instructing 3
+sequential tool calls — confirmed `stop_reason == "limit_turns"` after exactly 1
+turn, both called directly AND through the real `.as_tool()` path (a toy Chief
+wrapping the capped specialist) — in the latter case the specialist was cut off
+mid-tool-execution, before it could produce a text answer, and the Chief correctly
+received and relayed that degraded (but not corrupted or erroring) result. This is
+the actual failure mode a real runaway loop would hit: a graceful, bounded stop, not
+a crash.
+
+**Guardrail 2: off-topic scope check, prompt-level.** Added a "Scope check, before
+anything else" rule at the top of the Chief's SYSTEM_PROMPT (gateway/roles/
+orchestrator.py) — a message with no IDX/portfolio/market content gets a direct
+1-2 sentence decline with NO specialist or tool call, and a borderline
+general-knowledge question (e.g. "what's a P/E ratio") gets answered from the
+model's own knowledge rather than spending a tool call to confirm something it
+already knows. This is prompt-level, not a technical pre-filter — the Chief still
+makes one model call to read any message (unavoidable, since something has to
+decide what's in scope), but that's the fixed, small cost every question pays
+regardless; the guard prevents the expensive part (specialist delegation, Sectors
+API calls) from firing on a question that never needed it.
+
+**Verified live**: asked "Can you write me a poem about the moon?" — the Chief
+declined directly in one turn with no tool calls at all (confirmed by the trace: no
+`execute_tool`/`invoke_agent` spans, only the Chief's own single `chat` span), for
+3,000 total tokens (system prompt + tool schemas — the fixed cost of even
+considering the question) versus 20k+ tokens for a real multi-specialist question
+in earlier tests.
+
+All 72 existing tests still pass; no test file changes (guardrails verified live/
+structurally this round, matching how items 17/19/20/22 were also verified).
+
+**Not done**: no automated test covers `BoundedAgent`'s fallback behavior (verified
+manually above). The off-topic guard is a prompt instruction, not enforced in code —
+a sufficiently unusual or adversarial phrasing could still talk the model into
+calling a specialist for something out of scope; this is a real, inherent limit of
+prompt-level guardrails, not a false claim of a hard technical block. The `Limits`
+caps are also soft on tokens specifically ("a single oversized model response can
+overshoot the budget by one turn" — Strands' own docs), so total_tokens is a
+backstop against sustained runaway spend, not a byte-exact ceiling.
+
+## Item 24: Offline compliance-eval dashboard, seeded with real current data
+(2026-09-24)
+
+User asked to see the LLM-judge evaluation as a score, clarified via AskUserQuestion
+to mean an offline dashboard for the operator/stakeholder (not a live per-answer
+badge in the chat product).
+
+**Problem found first**: `evals/phoenix_evals.py`'s `_load_conversations()` only
+reads spans named `"chat_completion"` — the name `gateway/telemetry.py::
+traced_conversation()` gives a span, only ever created by `gateway/main.py`'s HTTP
+handler. Every live-test conversation this session (items 17-22) called
+`build_agent()`/`agent(prompt)` directly in throwaway scripts, bypassing that HTTP
+layer entirely, so none of them were ever visible to the eval script — the only
+existing annotations in Phoenix were 4 stale conversations (including literal
+dry-run placeholder answers) from item 11/13, months before this project's current
+5-role system existed.
+
+**Fixed by seeding fresh, representative data**, not by changing the eval script:
+new `scripts/generate_eval_conversations.py` runs 5 deliberately chosen real
+conversations (one per specialist role + one off-topic decline) through the exact
+same `traced_conversation()` path `gateway/main.py` uses, so they're indistinguishable
+from real product traffic to the eval script. This is a one-time seed script, not
+something run on a schedule — it costs real Anthropic credit per run (5 conversations,
+including one that deliberately triggers the Independent Risk and Evidence Officer,
+the most expensive path in the system) and is documented as such in its own
+docstring.
+
+Ran `evals/phoenix_evals.py` against the fresh traces (Haiku judge, 15 new
+annotations logged to Phoenix). Real results, not fabricated for the demo:
+
+| Rule | Pass rate | 
+|---|---|
+| Discloses missing data | 5/5 (100%) |
+| No investment recommendation | 4/5 (80%) |
+| Cites evidence date | 2/5 (40%) |
+
+**Two real, substantive findings the eval surfaced, not previously caught**:
+1. **Systemic**: 3 of 5 conversations cited specific figures (ROE, P/E, NIM, HHI,
+   ADV20, etc.) with no fiscal year or as-of date attached, despite every role's
+   system prompt explicitly requiring one ("State the fiscal year or as_of date for
+   every specific figure you cite" — investment_research.py; similar language
+   elsewhere). The rule exists in every prompt; the models don't reliably follow it
+   in practice. This is the dashboard's headline finding, not the flashier one below.
+2. **Isolated**: the conversation that triggered the Independent Risk and Evidence
+   Officer's REVISE verdict (item 22) was graded `gives_recommendation` — the
+   Chief's corrected final answer included directive language ("Do not treat the
+   13.36x P/E as fairly valued," a numbered "what to do before you buy" list) that
+   the judge read as telling the user what to do with their money, not just
+   describing findings, despite the standing disclaimer. Ironic given this is the
+   ONE conversation that went through independent review — the reviewer caught the
+   valuation-logic flaw but didn't catch (because it isn't its job to) that the
+   Chief's own corrected framing had drifted into advisory language.
+
+**Built `evals/build_dashboard.py`** (one-off generator, not a recurring job) that
+reads the fresh annotations from Phoenix and renders a static HTML report — 3
+pass-rate tiles, a "flagged by the judge" callout for the 2 real findings above, and
+every conversation's full judge explanations behind a `<details>` disclosure per
+rule. Published as an Artifact. Grounded in real data throughout — no lorem, no
+fabricated scores; every number traces back to `evals/phoenix_evals.py`'s actual
+Haiku-judge output, and the dashboard says exactly that in its own footer
+(judge model, conversation count, generation timestamp, and where to audit the
+underlying annotations in Phoenix's own trace UI).
+
+**Not done**: this is a static snapshot, not a live-updating dashboard — rerunning
+`generate_eval_conversations.py` + `phoenix_evals.py` + `build_dashboard.py` and
+republishing is a manual sequence, not automated. 5 conversations is a small,
+deliberately cost-bounded sample (one per role), not a statistically meaningful
+pass-rate measurement — treat the percentages as a snapshot of this run, not a
+long-run quality metric, until a larger, recurring eval run exists.
+
+## Item 25: Arize Phoenix's own agent evaluators (not the custom dashboard) — found
+a real bug, one real methodology mistake caught and fixed (2026-09-24)
+
+User clarified after item 24: they meant Phoenix's OWN evaluation UI (already
+populated by evals/phoenix_evals.py's `log_span_annotations` calls since item 11),
+not a custom-built dashboard — the item 24 artifact was unnecessary; Phoenix's
+trace UI already shows every annotation per span. Then asked specifically about
+Phoenix's built-in AGENT eval functions — `phoenix.evals.metrics`:
+`ToolSelectionEvaluator`, `ToolInvocationEvaluator`, `ToolResponseHandlingEvaluator`
+— genuinely different from evals/phoenix_evals.py's hand-rolled text classifiers:
+those grade the final answer TEXT against this project's compliance rules; these
+grade whether the AGENT USED ITS TOOLS correctly.
+
+**New `evals/agent_evals.py`**, built and run against the same 5 real conversations
+from item 24 (no new agent-side LLM/Sectors cost — only new judge calls):
+- `ToolSelectionEvaluator` at the Chief level: was the right specialist picked,
+  given the real, live-introspected tool list (`agent.tool_registry`, not
+  hardcoded — can't drift from gateway/roles/orchestrator.py).
+- `ToolInvocationEvaluator` per leaf tool call: were arguments valid against the
+  tool's real JSON schema.
+- `ToolResponseHandlingEvaluator` per leaf tool call: did the final text correctly
+  reflect what the tool actually returned.
+
+**First run was badly flawed, caught before trusting the results**: every leaf
+call was fed the plain top-level user question as `input` and the WHOLE
+conversation's final answer as `output`, with no real tool schema. Concretely
+caught via a raw-trace cross-check: the Independent Risk and Evidence Officer's
+legitimate peer-bank comparison (`analyze_fundamentals` for BBCA + BBRI + BMRI +
+BBNI + BNLI — real, valuable behavior, see item 22's BBRI-NIM finding) read as
+"wrong symbol" errors on every peer call, and nearly every tool's response read as
+"hallucinated" because the final answer legitimately synthesizes many OTHER tool
+calls' data too, which a single tool's raw result obviously doesn't contain by
+itself. User was asked whether to fix and rerun (cost: more Haiku judge credit) or
+just document the limitation — chose to fix and rerun.
+
+**Fix**: `input` is now built from the immediate specialist's own task text plus
+the other tool calls already made earlier in that same specialist's turn (real
+trajectory context, not just the top-level question); `available_tools` uses each
+tool's real captured JSON schema (`attributes.gen_ai['tool.json_schema']` on the
+span) instead of a bare description. This measurably fixed most invocation
+mis-grades (schema-based "hallucinated field" complaints gone; most peer-bank
+calls now correctly read as legitimate).
+
+**`ToolResponseHandlingEvaluator` stayed unreliable even after the fix, for a
+different, structural reason**: it assumes one tool call maps to one output (its
+own docstring examples are exactly that shape). This project's specialists
+routinely call 2-4 tools and synthesize ONE answer — comparing any single tool's
+raw result against that synthesized text reads as "hallucinated extra data" almost
+every time, even when handled correctly, because the "extra" data legitimately
+came from the specialist's OTHER tool calls in the same turn. Confirmed by watching
+it flag clearly-correct handling as "incorrect" across the board. **Decision: don't
+log it** — `evals/agent_evals.py` now excludes `tool_response_handling` from its
+default `--metrics`, with the reasoning in the module docstring; opt in explicitly
+if you want to see the noise yourself. This is a genuine limitation of that
+evaluator for a multi-tool-call-then-synthesize agent design like this one's, not
+something fixable by better prompting the judge.
+
+**Real findings from the corrected run** (30 tool_selection + tool_invocation
+annotations logged to Phoenix, `idx-agent-gateway` project — visible in its own UI,
+no separate dashboard):
+1. **A confirmed real bug, previously unnoticed**: the portfolio-risk conversation's
+   only `analyze_liquidity` call used `position_value: 0` (verified directly against
+   the raw trace event) instead of the actual ~5,040,000 IDR position value (800
+   shares x 6,300 IDR close) — producing a trivially-true `normal_exit_days: 0.0`.
+   The final answer nonetheless states specific liquidity figures ("5.04 billion
+   IDR", "0.7% of daily volume") that match NEITHER that call's result NOR simple
+   arithmetic on the real numbers (5.04M / 723B ADV20 ~ 0.0007%, not 0.7% — off by
+   roughly 1000x, and "billion" where "million" fits the real position size). Not
+   diagnosed further or fixed here — flagged for follow-up, out of this task's scope.
+2. **A genuine, debatable tension, not a bug**: even after the trajectory-context
+   fix, the judge still sometimes flags a legitimate peer-bank comparison call as
+   "incorrect" on strict grounds (the user named BBCA specifically; the tool call
+   was for a different symbol). Whether going beyond the literal user request to
+   build a more rigorous comparison is good agentic behavior or a scope violation is
+   a real, unresolved design question this evaluator surfaces — not something either
+   the agent or the eval script is simply getting "wrong."
+3. Reconfirms the already-known `get_company_report` invalid-section-guess issue
+   from item 22 (the model guessing section names not in the real API's list).
+
+**Not done**: `tool_response_handling` has no reliable evaluation path in this
+project yet — would need isolating true per-tool-call intermediate synthesis,
+which today's traces don't cleanly capture for a multi-tool-call agent. `evals/
+agent_evals.py` has no automated test, same as evals/phoenix_evals.py before it.
+
+## Item 26: `position_value: 0` root-caused and fixed, verified against real trace
+AND against Phoenix's own agent evaluator (2026-09-24)
+
+User asked whether item 25's `position_value: 0` finding traced back to incomplete
+data. Checked directly against the raw trace: `analyze_portfolio` had already run
+and correctly returned `position_values: {"BBCA.JK": 5040000.0}` — not a data gap
+at all. The real cause: `portfolio_risk_lead` requested `analyze_portfolio` AND
+`analyze_liquidity` in the SAME model turn (both tool_use blocks in one response),
+so when the model wrote `analyze_liquidity`'s arguments it had not yet seen
+`analyze_portfolio`'s result — it defaulted `position_value` to 0 rather than
+waiting. Item 20's `SequentialToolExecutor` fix doesn't touch this: that only
+changes execution ORDER after a turn's tool calls are already decided, not WHEN the
+model decides each call's arguments — both were already chosen together, before
+either ran, regardless of execution order.
+
+**Fixed** in `gateway/roles/portfolio_risk.py`'s SYSTEM_PROMPT: explicit instruction
+to call `analyze_portfolio` alone first when a position's dollar value is needed,
+read the real `position_values` back, and only then call `analyze_liquidity` with
+that number as a separate step — never guess or default a value that should come
+from another tool's result. Added as both a specific liquidity-workflow rule and a
+general Rules-section principle (applicable to any future tool with a similar
+dependency).
+
+**Verified two ways, not just one**:
+1. Re-ran the exact conversation that surfaced the bug, traced through the real
+   `traced_conversation()` path. Raw trace confirms `analyze_portfolio` and
+   `analyze_liquidity` now run in separate `execute_event_loop_cycle`s (separate
+   turns), and `analyze_liquidity` was called with `position_value: 5040000` — the
+   real number, matching `analyze_portfolio`'s own result exactly.
+2. Ran `evals/agent_evals.py`'s real `ToolInvocationEvaluator` against this specific
+   conversation, per the user's "and eval for it." First attempt still scored
+   `analyze_liquidity` incorrect — not because the fix failed, but because the
+   eval script's own trajectory context only included prior calls' ARGUMENTS, not
+   their RESULTS, so the judge couldn't verify where 5,040,000 came from and
+   reasonably flagged it as unverifiable. Fixed that too (prior-call context now
+   includes `tool(args) -> result`, not just `tool(args)`) and reran: both
+   `analyze_portfolio` and `analyze_liquidity` scored `correct`, logged to Phoenix.
+
+This is the second time this session a "did the agent's tool use pass eval" check
+was itself missing context needed for a fair verdict (item 25's peer-comparison
+misread, now this) — worth remembering as a standing lesson for any future
+eval-script work in this project: a dependent value's correctness is only
+checkable against the PRIOR RESULT that produced it, not the prior call alone.
+
+72/72 tests still pass (prompt-only + eval-script changes, no new test file).
+
+## Item 27: Filling the "uneven test" gaps — 3 new market-intelligence endpoints
+wired and live-tested, 4 of 5 Independent Risk Officer verdicts now observed
+(2026-09-24)
+
+User asked to fill both gaps flagged earlier: Market Intelligence's never-called
+endpoints, and the Independent Risk and Evidence Officer's never-seen verdicts
+(only REVISE had been observed, in item 22).
+
+**Market Intelligence: 3 endpoints wired for the first time.**
+`get_corporate_actions_calendar` (market-wide, date-windowed — distinct from the
+already-wired per-symbol `get_corporate_actions`), `get_suspensions`, and
+`get_top_brokers_daily` existed as `SectorsClient` methods but had no repository
+function, no gateway tool, and had never once been called against the real API.
+Inspected real response shapes live before wiring (not guessed) — `data/
+repositories.py` gained 3 new CACHE + Postgres-audit-trail functions (same pattern
+as item 21), reusing existing `corporate_actions`/`suspensions`/`broker_rankings`
+tables and upsert methods that had sat unused since an earlier, unfinished ingest
+design. Added to both `market_and_event_intelligence_lead` and
+`independent_risk_and_evidence_officer`'s toolsets (the latter needs them to
+reproduce any market-intelligence claim it's reviewing).
+
+**Two real bugs found live while testing the new wiring, both fixed:**
+1. The Chief declined a market-wide "what's coming up" question outright, without
+   even trying to delegate — because `market_and_event_intelligence_lead`'s short
+   `DESCRIPTION` string (the only thing the Chief sees when deciding whether to
+   delegate) was never updated to mention the new calendar/suspensions/broker-
+   ranking capabilities. Fixed by updating the description; re-tested, now
+   delegates correctly.
+2. **The model doesn't reliably know today's actual date.** Asked "what's coming
+   up in the next couple months," it passed literal `start: "2025-01-01", end:
+   "2025-03-31"` to `get_corporate_actions_calendar` — guessing based on training-
+   era assumptions rather than the real system date (2026-09-24, confirmed by all
+   ingested price data throughout this project). Everything reported as "upcoming"
+   was actually 18+ months stale, without looking wrong. Fixed with an explicit
+   system-prompt rule: never guess absolute dates for a relative time question —
+   omit `start`/`end`/`trade_date` and let the tool's own real-current-date default
+   apply, then read the actual dates back from the result. Re-tested: correctly
+   omitted the params and reported real, current (Aug-Oct 2026) data.
+
+**A residual concurrency finding, not fully fixed**: the item 20 "already
+processing a request" race recurred once during this round's testing. Raw trace
+showed `SequentialToolExecutor` DID run the two same-specialist calls back-to-back
+(not concurrently — second one started 0.2ms after the first ended) — yet the
+second still hit the lock. The model self-recovered via a third retry, same
+graceful degradation as before. This looks like a small timing gap between the
+wrapped agent's `finally: lock.release()` actually executing and
+`SequentialToolExecutor` proceeding to the next tool_use, not a failure of the
+item 20 fix's design — but it's a genuine, still-open residual risk in tight-
+timing edge cases, not something resolved by that fix alone. Not investigated
+further (would require digging into Strands' async-generator/lock internals).
+
+**Independent Risk and Evidence Officer: 3 new verdicts observed live, one
+genuine bug found and fixed along the way.**
+- **PASS**: asked for BBCA's NIM and cost-to-income ratio with the fiscal year
+  stated. The reviewer re-verified every figure against `analyze_fundamentals`
+  and `get_company_report` directly, confirmed all three claims, and returned
+  PASS — the Chief correctly gated "PASSED INDEPENDENT REVIEW" language on that
+  actual verdict, not just because a review was attempted.
+- **REVISE (a second real instance, a different failure mode than item 22)**:
+  asked about BBCA's FCFE and whether it covers the dividend. `investment_research_lead`
+  cited a specific "FCF" figure (609 IDR/share) as if it were a computed FCFE
+  proxy, when `analyze_fundamentals`'s own FCFE/FCFF are `Unavailable`. Checked
+  directly against `get_company_report`'s raw data: the cited number (75,057,575M
+  IDR) is REAL — Sectors' own `historical_financials.free_cash_flow` field,
+  confirmed present — so this was NOT fabrication, but an undisclosed metric
+  substitution (a different, differently-defined figure presented as if it
+  answered the FCFE question). The reviewer caught this along with a real
+  305-vs-336 IDR dividend-per-share discrepancy (partial-payments sum vs. the
+  AGM's total approved dividend) and a shares-outstanding inconsistency (123.2B
+  claimed vs. ~122B implied by market cap), forcing REVISE. **Fixed**:
+  `investment_research.py`'s system prompt now requires this substitution be
+  named explicitly ("Sectors' reported free_cash_flow", never relabeled as
+  "FCFE"/"FCF proxy"), plus a new rule requiring any two conflicting per-share
+  figures to be stated with their sources rather than one silently picked. Not
+  yet re-verified live (the triggering conversation was expensive — specialist +
+  reviewer each made 5-6 tool calls; treated as a straightforward, low-risk prompt
+  fix consistent with other verified fixes this session, not worth the repeat
+  cost to re-confirm immediately).
+- **HUMAN ESCALATION**: asked whether reaching a specific BBCA weight satisfies an
+  undefined "reasonable diversification" mandate term. Genuinely a two-turn test
+  (the Chief correctly asked for missing portfolio/mandate details before
+  attempting anything on the first turn) — and the follow-up turn's question had
+  an unintentional logic error of its own (asked about "40% weight" while actually
+  describing deploying all remaining cash into BBCA, which is mathematically
+  100%, not 40%). The reviewer caught that inconsistency AND correctly identified
+  that "reasonable diversification" has no quantitative threshold in the stated
+  mandate, returning HUMAN ESCALATION with specific clarifying questions for the
+  user. A good validation, if not quite the clean single-turn test originally
+  intended.
+- **DATA BLOCKED**: not observed this round — the FCFE attempt above produced
+  REVISE instead (a defensible, arguably more informative verdict for that
+  specific situation: a correctable disclosure problem, not just missing data).
+  Not pursued further given cost; 4 of 5 verdicts now confirmed live is treated
+  as sufficient coverage for now.
+
+72/72 tests pass throughout. All new live conversations went through the real
+`traced_conversation()` path (not bypassing it, unlike some earlier live tests),
+so they're visible to both `evals/phoenix_evals.py` and `evals/agent_evals.py` if
+graded later.
+
+**Not done**: DATA BLOCKED still unobserved. The FCF-disclosure fix is unverified
+live. The concurrency race's exact root cause (async-generator/lock timing inside
+Strands) is undiagnosed, only worked around by the model's own retry behavior.
+`get_corporate_actions_calendar`/`get_suspensions`/`get_top_brokers_daily`'s
+filter params remain as unconfirmed as the other event endpoints were before item
+19 — only called with defaults so far, never with an explicit filter tested.
 
 ## Not started / open
 
