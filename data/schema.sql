@@ -115,3 +115,20 @@ CREATE TABLE IF NOT EXISTS broker_activity (
     fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (symbol, trade_date)
 );
+
+-- LONG-TERM per-user memory (durable, unlike Valkey's session store — see
+-- data/session_repository.py for the short-term/session counterpart). Free-form
+-- by design ("anything user related should be configurable"): a fact is whatever
+-- text the user or the agent decided was worth remembering (a portfolio, a mandate
+-- limit, a recorded thesis, a preference), not a fixed set of columns. Read/written
+-- via data/memory_store.py::PostgresUserMemoryStore, which implements Strands'
+-- MemoryStore protocol so the Chief's `remember`/`recall` tools are Strands' own
+-- add_memory/search_memory, not hand-rolled ones.
+CREATE TABLE IF NOT EXISTS user_memory (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    metadata    JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS user_memory_user_id_idx ON user_memory (user_id, created_at DESC);

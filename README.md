@@ -224,6 +224,37 @@ Chief -> Investment Research Lead -> tool-call path, has been run and traced
 end to end — see PROGRESS.md items 12-14. `idx-analyst-gpt` (OpenAI) still has
 `model_id: TODO` and no key — untested.
 
+## Session and memory
+
+Two different stores for two different lifetimes, both verified live against real
+infrastructure (see PROGRESS.md item 16 for the full transcript, including two real
+bugs found and fixed along the way):
+
+- **Short-term (per-session conversation), Valkey**: `data/session_repository.py`'s
+  `ValkeySessionRepository` implements Strands' `SessionRepository`, wired via
+  `RepositorySessionManager` into the Chief only (Investment Research Lead is
+  wrapped with `preserve_context=False`, which Strands forbids combining with a
+  session manager). Sliding 4-hour TTL. The gateway issues an `X-Session-Id`
+  response header on the first message; echo it back on later ones in the same
+  conversation and only your newest message needs sending — history is restored
+  server-side. No header, or one Valkey no longer recognizes, falls back to today's
+  behavior (send the full array).
+- **Long-term (per-user facts), Postgres**: `data/memory_store.py`'s
+  `PostgresUserMemoryStore` implements Strands' `MemoryStore`, giving the Chief its
+  `search_memory`/`add_memory` tools. Deliberately Postgres, not Valkey — Valkey
+  runs with `--maxmemory-policy allkeys-lru`, correct for a cache but wrong for
+  memory that must actually persist. Deliberately free-form text (not a fixed
+  schema): a fact is whatever the user or the Chief decided was worth remembering
+  — a portfolio position, a mandate limit, a preference. Searched via Postgres
+  full-text search (OR-of-words, ranked by `ts_rank`), not embeddings — zero
+  additional API cost, matching this project's credit-consciousness. No automatic
+  background extraction or context injection either, for the same reason: memory
+  only costs something when the Chief (or the user) actually asks for it.
+
+```
+python scripts/manage.py init-db   # picks up the new user_memory table
+```
+
 ## Observability and evaluation (Arize Phoenix)
 
 `docker-compose.yml`'s `phoenix` service is wired up and verified working, not just

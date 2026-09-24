@@ -4,6 +4,7 @@ See idx_agent_infrastructure_diagrams_md.md sections 2-4.
 """
 
 import os
+import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -18,7 +19,10 @@ from gateway.guardrails import (
 )
 from gateway.registry import load_registry
 from gateway.telemetry import setup_telemetry, traced_conversation
-from data.deps import get_cache
+from data.deps import get_cache, get_db
+from data.session_repository import ValkeySessionRepository
+
+SESSION_HEADER = "X-Session-Id"
 
 setup_telemetry()
 
@@ -81,33 +85,49 @@ async def chat_completions(request: Request):
 
     model_entry = _registry[model_name]
     system_prompt, chat_messages = compat.split_system_prompt(messages)
-    strands_messages = compat.to_strands_messages(chat_messages)
     question = compat.latest_user_text(chat_messages)
 
-    agent = _build_agent_with_fallback(model_entry)
+    # A session the client echoes back already has its history restored
+    # server-side (gateway/roles/orchestrator.py's session_manager) — resending
+    # the full array would duplicate it, so only the newest turn goes to the
+    # agent. No session header, or one Valkey has never seen (expired or never
+    # existed), gets the client's full array once to seed it — see
+    # data/session_repository.py's TTL for how long a session stays alive.
+    session_id = request.headers.get(SESSION_HEADER) or uuid.uuid4().hex
+    is_continuing_session = ValkeySessionRepository(get_cache()).read_session(session_id) is not None
+    strands_messages = compat.to_strands_messages(chat_messages[-1:] if is_continuing_session else chat_messages)
+
+    agent = _build_agent_with_fallback(model_entry, user_id=user_id, session_id=session_id)
     if system_prompt:
         agent.system_prompt = f"{agent.system_prompt}\n\n{system_prompt}"
 
     if stream:
-        return StreamingResponse(
+        response = StreamingResponse(
             _stream_response(agent, strands_messages, model_name, question, user_id),
             media_type="text/event-stream",
         )
+        response.headers[SESSION_HEADER] = session_id
+        return response
 
     with traced_conversation(question, model_name, user_id) as span:
         text = await _run_to_completion(agent, strands_messages)
         answer = attach_disclaimer(text)
         span.set_output(answer)
-    return JSONResponse(compat.completion_response(compat.completion_id(), model_name, answer))
+    return JSONResponse(
+        compat.completion_response(compat.completion_id(), model_name, answer),
+        headers={SESSION_HEADER: session_id},
+    )
 
 
-def _build_agent_with_fallback(model_entry):
+def _build_agent_with_fallback(model_entry, *, user_id: str, session_id: str):
     try:
-        return build_agent(model_entry)
+        return build_agent(model_entry, db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id)
     except Exception:
         if not model_entry.fallback:
             raise
-        return build_agent(_registry[model_entry.fallback])
+        return build_agent(
+            _registry[model_entry.fallback], db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id
+        )
 
 
 async def _run_to_completion(agent, messages: list[dict]) -> str:

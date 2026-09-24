@@ -613,6 +613,90 @@ annotations **by default** (`--no-log-annotations` to skip). A reviewer can now 
 results directly in the trace list and per-trace detail view — no script output,
 no separate dashboard to build.
 
+## Item 16: session management (Valkey) + long-term memory (Postgres) — verified live (2026-09-24)
+
+User asked, before continuing to build more agents: can Valkey do session
+management and per-user memory (short-term and long-term)? Answer given: Valkey is
+a good fit for short-term (TTL-based, fine to lose under memory pressure), but
+Valkey's own `--maxmemory-policy allkeys-lru` (docker-compose.yml) makes it the
+wrong place for anything that must actually persist — a silently-evicted portfolio
+or recorded thesis would be a real correctness bug, not just a slowdown. Long-term
+went to Postgres instead. When asked what long-term memory should concretely store,
+the user said "anything user related should be configurable" — so it's free-form
+text facts, not a fixed schema of typed columns.
+
+**Used Strands' own native subsystems instead of hand-rolling**, discovered by
+checking the library before assuming nothing existed: `strands.session.
+RepositorySessionManager` + a custom `SessionRepository` for short-term, and
+`strands.memory.MemoryManager` + a custom `MemoryStore` for long-term — both are
+first-class Strands abstractions with well-defined protocols, giving the Chief
+Strands' own `search_memory`/`add_memory` tools for free rather than hand-rolled
+ones.
+
+- **`data/session_repository.py`** (new): `ValkeySessionRepository`, a full
+  implementation of Strands' `SessionRepository` abstract class, backed by Valkey
+  with a sliding 4-hour TTL (refreshed on every write). Wired via
+  `RepositorySessionManager` into the Chief only — not Investment Research Lead,
+  which is wrapped via `.as_tool()` with `preserve_context=False`, and Strands
+  explicitly forbids combining that with a session_manager (a real constraint
+  found while implementing, not assumed).
+- **`data/memory_store.py`** (new): `PostgresUserMemoryStore`, implementing
+  Strands' `MemoryStore` protocol against the new `user_memory` table
+  (`data/schema.sql`) — free-form text facts + JSONB metadata per user_id.
+  Deliberately no automatic background extraction (`extraction=False`) and no
+  automatic context injection (`MemoryManager(injection=False)`) — both would add
+  real per-call token cost regardless of relevance, cutting against this project's
+  established credit-consciousness; the Chief only pays for memory when it (or the
+  user) explicitly calls `add_memory`/`search_memory`.
+- **`gateway/main.py`**: added `X-Session-Id` request/response header handling. A
+  session Valkey has already seen gets only the newest message forwarded to the
+  agent (history is restored server-side); an unseen or absent one gets the
+  client's full message array once, seeding the session. `gateway/roles/
+  orchestrator.py::build_agent` now takes `db`, `cache`, `user_id`, `session_id`
+  and wires both subsystems in.
+- **Two real bugs found via live testing, not assumed correct from a first pass**:
+  1. `search_user_memory`'s first implementation used `ILIKE '%<whole query>%'`
+     directly on the query string — a real gateway conversation showed the model
+     calls `search_memory` with natural-language phrases ("BBCA holdings shares
+     position"), which essentially never appears as one contiguous substring in
+     stored text ("User holds 1000 shares of BBCA") despite every word being
+     present.
+  2. Switching to Postgres full-text search (`plainto_tsquery`) didn't fix it
+     either — `plainto_tsquery` ANDs every word together, so the query's 4th word
+     ("position", absent from the stored fact) zeroed out an otherwise-good match.
+     Fixed by building an OR-query across the query's own words instead (`" | "
+     .join(words)` into `to_tsquery`), ranked by `ts_rank` — verified directly
+     against Postgres with the exact failing query strings before re-testing live.
+  3. A related process mistake, not a code bug: re-tested through a gateway
+     process that had been started *before* the `db.py` fix, without `--reload` —
+     got the same wrong (empty) answer again and briefly suspected the fix hadn't
+     worked, until noticing the process was running stale code. Restarted, correct
+     recall confirmed immediately.
+- **Verified end to end, live, with real Anthropic calls (Haiku)**:
+  - Long-term memory **persists across sessions for the same user**: told it to
+    remember a portfolio position + mandate limit in one session; a brand-new
+    session (no shared header) for the same `user` correctly recalled both via
+    `search_memory`, and correctly added the honest caveat that checking the
+    position against the limit needs Portfolio Risk Lead (not built yet).
+  - Long-term memory **does not leak across users** (tested at the store level,
+    `test_search_scoped_to_user`).
+  - Short-term session continuity: told it "my lucky number is 42, don't save it,"
+    then in the SAME `X-Session-Id`, asked "what did I just say" — answered "42"
+    correctly, from restored conversation history alone (no memory tool called).
+    Confirmed directly in Postgres afterward: "42" was never written to
+    `user_memory` — it correctly honored "don't save it."
+- New tests: `data/tests/test_memory_store.py` (5 tests, including the exact
+  natural-language-query regression above) and `data/tests/test_session_repository.py`
+  (5 tests, including a real `RepositorySessionManager` restore-on-a-fresh-object
+  check). All 69 `data`/`analysis` tests pass.
+
+**Not done**: no UI decided yet, so there's no confirmed source for a session id
+other than the gateway's own `X-Session-Id` header scheme built here — a real chat
+UI's own conversation-id convention, once one is chosen, may fit more naturally than
+asking the UI to echo a header. Portfolio Risk Lead still doesn't exist, so a
+recalled portfolio position still can't be checked against a recalled mandate limit
+end to end — memory can retrieve both facts, but nothing computes with them yet.
+
 ## Not started / open
 
 1. ~~`db.init_schema()` is never called anywhere~~ — done for real: 11 tables exist in

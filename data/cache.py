@@ -74,6 +74,23 @@ class Cache:
             self._redis.expire(key, ttl)
         return count
 
+    def hset_json(self, key: str, field: str, value) -> None:
+        self._redis.hset(key, field, json.dumps(value, default=str))
+
+    def hget_json(self, key: str, field: str):
+        raw = self._redis.hget(key, field)
+        return None if raw is None else json.loads(raw)
+
+    def hgetall_json(self, key: str) -> dict:
+        return {k: json.loads(v) for k, v in self._redis.hgetall(key).items()}
+
+    def expire(self, key: str, ttl: int) -> None:
+        self._redis.expire(key, ttl)
+
+    def delete(self, *keys: str) -> None:
+        if keys:
+            self._redis.delete(*keys)
+
     def is_negative_cached(self, key: str) -> bool:
         return self._redis.exists(f"notfound:{key}") == 1
 

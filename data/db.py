@@ -5,6 +5,7 @@ CACHE-strategy endpoints (screener, company report, ...) are not stored here;
 they live only in Valkey (data/cache.py).
 """
 
+import re
 from datetime import date
 from pathlib import Path
 
@@ -315,3 +316,62 @@ class Database:
                 """,
                 (symbol, trade_date_, psycopg.types.json.Json(payload)),
             )
+
+    # -- User memory, long-term (data/memory_store.py::PostgresUserMemoryStore) ----
+
+    def add_user_memory(self, user_id: str, content: str, metadata: dict | None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO user_memory (user_id, content, metadata) VALUES (%s, %s, %s)",
+                (user_id, content, psycopg.types.json.Json(metadata) if metadata is not None else None),
+            )
+
+    def search_user_memory(self, user_id: str, query: str | None, limit: int) -> list[dict]:
+        """Postgres full-text search (`to_tsvector`/`plainto_tsquery`) on `content`,
+        ranked by relevance — zero-cost (no embeddings/model call), matching this
+        project's credit-consciousness. A live run showed a plain `ILIKE
+        '%<whole query>%'` essentially never matches: the model calls this with a
+        natural-language phrase like "concentration limit mandate limits" against
+        stored text like "User's personal concentration limit is 15% per name" —
+        different word order, so a single-substring match fails even though every
+        word is present.
+
+        Full-text search alone wasn't enough either, confirmed live: `plainto_tsquery`
+        ANDs every word in the query together, so a 4-word query like "BBCA holdings
+        shares position" needs all 4 lexemes present in the stored text — "position"
+        alone being absent zeroed out an otherwise-good match. OR-ing the query's
+        words instead (built here, not via plainto_tsquery) is the right fit for a
+        loose "find anything related" recall tool, ranked by how many terms matched
+        so a fact matching more of the query still sorts first.
+
+        Genuinely no match returns empty, not a substitute of unrelated recent
+        facts — presenting those as if they matched would misrepresent them as
+        relevant, the same discipline this project applies to any other missing
+        result. Pass `query=None` (not an empty-match query) to explicitly list the
+        most recent facts unfiltered.
+        """
+        with self._connect() as conn:
+            if query:
+                # Alphanumeric words only, so this can never be interpreted as
+                # tsquery operator syntax (&, |, !, (, ), :*) — safe to join with " | ".
+                words = re.findall(r"[A-Za-z0-9]+", query)
+                if not words:
+                    return []
+                or_query = " | ".join(words)
+                return conn.execute(
+                    """
+                    SELECT content, metadata, created_at FROM user_memory
+                    WHERE user_id = %s AND to_tsvector('english', content) @@ to_tsquery('english', %s)
+                    ORDER BY ts_rank(to_tsvector('english', content), to_tsquery('english', %s)) DESC
+                    LIMIT %s
+                    """,
+                    (user_id, or_query, or_query, limit),
+                ).fetchall()
+            return conn.execute(
+                """
+                SELECT content, metadata, created_at FROM user_memory
+                WHERE user_id = %s
+                ORDER BY created_at DESC LIMIT %s
+                """,
+                (user_id, limit),
+            ).fetchall()
