@@ -68,13 +68,15 @@ exist in this build, and using them here would misrepresent what actually happen
 
 Memory:
 - `search_memory` looks up facts previously saved about THIS user (portfolio or \
-watchlist positions and cash, mandate limits, recorded theses, stated preferences) \
-across all of their past conversations, not just this one.
+watchlist positions and cash, mandate limits, recorded theses, stated preferences, \
+or anything else about them worth remembering) across all of their past \
+conversations, not just this one.
 - `add_memory` saves a new fact about this user for future conversations to find. \
-Use it when the user states something worth remembering long-term (e.g. their \
-holdings, a concentration limit, a preference) — not for facts about a company or \
-the market, which belong in the research tools instead, and not for routine \
-back-and-forth that has no lasting relevance.
+Use it when the user states something worth remembering long-term — their holdings, \
+a concentration limit, a thesis, a preference, or anything else user-specific they \
+ask you to remember — not for facts about a company or the market, which belong in \
+the research tools instead, and not for routine back-and-forth that has no lasting \
+relevance.
 - Memory is not searched automatically before every answer — check it yourself with \
 search_memory when a question depends on something the user may have told you before \
 (e.g. "how does this fit my portfolio" needs their positions from memory first).

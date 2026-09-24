@@ -12,7 +12,7 @@ import psycopg
 import pytest
 
 from data.db import Database
-from data.memory_store import PostgresUserMemoryStore
+from data.memory_store import PostgresUserMemoryStore, _classify
 
 
 def _run(coro):
@@ -93,3 +93,27 @@ def test_search_no_genuine_match_returns_empty_not_unrelated_facts(db: Database,
     _run(store.add("User holds 1000 shares of BBCA"))
 
     assert _run(store.search("zzzznonexistentwordzzzz")) == []
+
+
+def test_classify_predefined_kinds():
+    assert _classify("User holds 1000 shares of BBCA") == "portfolio"
+    assert _classify("User's personal concentration limit is 15% per name") == "mandate_limit"
+    assert _classify("User's thesis on BBCA: expect margin expansion from digital lending") == "thesis"
+    assert _classify("User prefers answers without jargon") == "preference"
+    assert _classify("User's favorite color is blue") == "other"
+
+
+def test_add_auto_tags_kind_in_metadata(db: Database, user_id: str):
+    store = PostgresUserMemoryStore(db, user_id=user_id)
+    _run(store.add("User holds 1000 shares of BBCA"))
+
+    results = _run(store.search("BBCA"))
+    assert any(r.metadata.get("kind") == "portfolio" for r in results)
+
+
+def test_add_caller_metadata_overrides_auto_classified_kind(db: Database, user_id: str):
+    store = PostgresUserMemoryStore(db, user_id=user_id)
+    _run(store.add("User holds 1000 shares of BBCA", {"kind": "custom"}))
+
+    results = _run(store.search("BBCA"))
+    assert any(r.metadata.get("kind") == "custom" for r in results)

@@ -690,6 +690,21 @@ ones.
   (5 tests, including a real `RepositorySessionManager` restore-on-a-fresh-object
   check). All 69 `data`/`analysis` tests pass.
 
+**Follow-up (same day)**: user then asked for predefined categories from us,
+alongside the user-configurable free text — "predefined from us but user still can
+manage their own preference." Discovered while implementing that Strands' generic
+`add_memory` tool (built by `MemoryManager`) only exposes `entries: list[str]` to
+the model, with no per-entry metadata parameter, so the model itself cannot set a
+category. Implemented as server-side auto-classification instead:
+`data/memory_store.py::_classify()` tags every fact with one of four predefined
+`kind`s from the business doc (`portfolio`, `mandate_limit`, `thesis`,
+`preference`) by keyword, defaulting to `other` — purely organizational metadata
+for future filtering/analytics (`metadata->>'kind'`), never gating what gets
+written or recalled. A caller-supplied `metadata={"kind": ...}` still overrides the
+auto-tag. 2 new tests (`test_add_auto_tags_kind_in_metadata`,
+`test_add_caller_metadata_overrides_auto_classified_kind`) plus a pure-function
+`test_classify_predefined_kinds`. All 72 `data`/`analysis` tests pass.
+
 **Not done**: no UI decided yet, so there's no confirmed source for a session id
 other than the gateway's own `X-Session-Id` header scheme built here — a real chat
 UI's own conversation-id convention, once one is chosen, may fit more naturally than
