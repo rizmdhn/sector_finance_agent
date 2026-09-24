@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError } from "../api/client";
-import { addMemory, deleteMemory, listMemory } from "../api/memory";
+import { addMemory, deleteMemory, listMemory, updateMemory } from "../api/memory";
 import type { MemoryEntry } from "../types";
 
 function formatDate(iso: string): string {
@@ -14,6 +14,9 @@ export default function Memory({ userId }: { userId: string }) {
   const [draft, setDraft] = useState("");
   const [adding, setAdding] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -47,6 +50,30 @@ export default function Memory({ userId }: { userId: string }) {
     }
   }
 
+  function startEdit(entry: MemoryEntry) {
+    setEditingId(entry.id);
+    setEditDraft(entry.content);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditDraft("");
+  }
+
+  async function handleSaveEdit(id: number) {
+    if (!editDraft.trim()) return;
+    setSavingEdit(true);
+    try {
+      const updated = await updateMemory(userId, id, editDraft.trim());
+      setEntries((prev) => prev.map((entry) => (entry.id === id ? updated : entry)));
+      cancelEdit();
+    } catch (err) {
+      setError(err instanceof ApiError ? `Could not update (${err.status}): ${err.message}` : "Could not update.");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
   async function handleDelete(id: number) {
     setDeletingId(id);
     try {
@@ -66,8 +93,8 @@ export default function Memory({ userId }: { userId: string }) {
         <p className="subtitle">
           Long-term facts saved about <strong>{userId}</strong> — real data from Postgres
           (<code>user_memory</code>), the same store the Chief's <code>search_memory</code>/
-          <code>add_memory</code> tools read and write mid-conversation. Add or remove a fact here
-          and it's visible to the agent on its next chat immediately.
+          <code>add_memory</code> tools read and write mid-conversation. Add, edit, or remove a fact
+          here and it's visible to the agent on its next chat immediately.
         </p>
       </header>
 
@@ -94,30 +121,65 @@ export default function Memory({ userId }: { userId: string }) {
 
       {!loading && entries.length > 0 && (
         <ul className="memory-list">
-          {entries.map((entry) => (
-            <li key={entry.id} className="memory-item">
-              <div className="memory-item-main">
-                <p className="memory-content">{entry.content}</p>
-                <div className="memory-meta">
-                  {Boolean(entry.metadata?.kind) && (
-                    <span className="kind-chip">{String(entry.metadata?.kind)}</span>
-                  )}
-                  <span className="memory-date">{formatDate(entry.created_at)}</span>
-                </div>
-              </div>
-              <button
-                className="memory-delete-btn"
-                onClick={() => handleDelete(entry.id)}
-                disabled={deletingId === entry.id}
-              >
-                {deletingId === entry.id ? "Removing…" : "Remove"}
-              </button>
-            </li>
-          ))}
+          {entries.map((entry) => {
+            const isEditing = editingId === entry.id;
+            return (
+              <li key={entry.id} className="memory-item">
+                {isEditing ? (
+                  <div className="memory-item-main">
+                    <input
+                      className="memory-input memory-edit-input"
+                      type="text"
+                      value={editDraft}
+                      onChange={(event) => setEditDraft(event.target.value)}
+                      disabled={savingEdit}
+                      autoFocus
+                    />
+                    <div className="memory-edit-actions">
+                      <button
+                        className="memory-add-btn"
+                        onClick={() => handleSaveEdit(entry.id)}
+                        disabled={savingEdit || !editDraft.trim()}
+                      >
+                        {savingEdit ? "Saving…" : "Save"}
+                      </button>
+                      <button className="memory-delete-btn" onClick={cancelEdit} disabled={savingEdit}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="memory-item-main">
+                      <p className="memory-content">{entry.content}</p>
+                      <div className="memory-meta">
+                        {Boolean(entry.metadata?.kind) && (
+                          <span className="kind-chip">{String(entry.metadata?.kind)}</span>
+                        )}
+                        <span className="memory-date">{formatDate(entry.created_at)}</span>
+                      </div>
+                    </div>
+                    <div className="memory-item-actions">
+                      <button className="memory-edit-btn" onClick={() => startEdit(entry)}>
+                        Edit
+                      </button>
+                      <button
+                        className="memory-delete-btn"
+                        onClick={() => handleDelete(entry.id)}
+                        disabled={deletingId === entry.id}
+                      >
+                        {deletingId === entry.id ? "Removing…" : "Remove"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
 
-      <p className="mock-note">Real endpoint: gateway/main.py's /v1/memory (GET/POST/DELETE) — not a mock.</p>
+      <p className="mock-note">Real endpoint: gateway/main.py's /v1/memory (GET/POST/PATCH/DELETE) — not a mock.</p>
     </div>
   );
 }

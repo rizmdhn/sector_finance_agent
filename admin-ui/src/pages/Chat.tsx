@@ -1,13 +1,32 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { createSession, listSessions, sendMessage } from "../api/chat";
-import type { ChatSession } from "../types";
+import { ApiError } from "../api/client";
+import { ROLES } from "../api/modelTiers";
+import { Markdown } from "../markdown";
+import type { ChatMessage, ChatSession } from "../types";
+
+// Friendly labels for the `step` values gateway/main.py's SSE stream can send —
+// the Chief's own tool names (the 4 specialists, from ROLES, plus its 2 memory
+// tools, which aren't roles so have no ROLES entry).
+const STEP_LABELS: Record<string, string> = {
+  ...Object.fromEntries(ROLES.map((role) => [role.id, `Consulting ${role.label}…`])),
+  search_memory: "Checking memory…",
+  add_memory: "Saving to memory…",
+};
+
+function stepLabel(step: string): string {
+  return STEP_LABELS[step] ?? `Working (${step})…`;
+}
 
 export default function Chat({ userId }: { userId: string }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [currentStep, setCurrentStep] = useState<string | null>(null);
+  const [streamingText, setStreamingText] = useState("");
   const [loading, setLoading] = useState(true);
+  const [sendError, setSendError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -23,7 +42,7 @@ export default function Chat({ userId }: { userId: string }) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeId, sessions]);
+  }, [activeId, sessions, streamingText]);
 
   const active = sessions.find((session) => session.id === activeId) ?? null;
 
@@ -38,12 +57,45 @@ export default function Chat({ userId }: { userId: string }) {
     if (!draft.trim() || !activeId) return;
     const text = draft.trim();
     setDraft("");
+    setSendError(null);
+
+    // Optimistic: show the user's own message immediately — sendMessage() below
+    // also persists it, but not until the network round-trip finishes, and a
+    // real gateway call can take several seconds. Without this the message the
+    // user just sent doesn't appear until the reply does, which reads as "did
+    // this even send?" (found live, this is what prompted this fix).
+    const optimisticMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: text,
+      createdAt: new Date().toISOString(),
+    };
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === activeId ? { ...session, messages: [...session.messages, optimisticMessage] } : session
+      )
+    );
+
     setSending(true);
+    setCurrentStep(null);
+    setStreamingText("");
     try {
-      const updated = await sendMessage(activeId, text);
+      const updated = await sendMessage(activeId, text, setCurrentStep, setStreamingText);
       setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
+    } catch (err) {
+      // The user's message is already saved (sendMessage pushes it before the
+      // network call) — reload so the bubble shows even though the reply failed.
+      const loaded = await listSessions(userId);
+      setSessions(loaded);
+      if (err instanceof ApiError && err.status === 429) {
+        setSendError("Rate limited — wait a moment and try again.");
+      } else {
+        setSendError("Could not reach the gateway.");
+      }
     } finally {
       setSending(false);
+      setCurrentStep(null);
+      setStreamingText("");
     }
   }
 
@@ -97,12 +149,32 @@ export default function Chat({ userId }: { userId: string }) {
                 {active.messages.map((message) => (
                   <div key={message.id} className={`chat-bubble chat-bubble--${message.role}`}>
                     <div className="chat-bubble-role">{message.role === "user" ? userId : "assistant"}</div>
-                    <p>{message.content}</p>
+                    <Markdown text={message.content} />
                   </div>
                 ))}
-                {sending && <div className="chat-bubble chat-bubble--assistant chat-bubble--typing">…</div>}
+                {sending && streamingText && (
+                  <div className="chat-bubble chat-bubble--assistant">
+                    <div className="chat-bubble-role">assistant</div>
+                    <Markdown text={streamingText} />
+                  </div>
+                )}
+                {sending && !streamingText && (
+                  <div className="chat-bubble chat-bubble--assistant chat-bubble--typing">
+                    {currentStep ? (
+                      <span className="chat-step-label">{stepLabel(currentStep)}</span>
+                    ) : (
+                      <>
+                        <span />
+                        <span />
+                        <span />
+                      </>
+                    )}
+                  </div>
+                )}
                 <div ref={bottomRef} />
               </div>
+
+              {sendError && <p className="status-line status-line--error chat-send-error">{sendError}</p>}
 
               <form className="chat-input-row" onSubmit={handleSend}>
                 <input
@@ -122,7 +194,9 @@ export default function Chat({ userId }: { userId: string }) {
         </section>
       </div>
 
-      <p className="mock-note">Mock replies only — not wired to /v1/chat/completions yet. See src/api/chat.ts.</p>
+      <p className="mock-note">
+        Real endpoint: gateway/main.py's /v1/chat/completions — a real model call, real credit spent per message.
+      </p>
     </div>
   );
 }

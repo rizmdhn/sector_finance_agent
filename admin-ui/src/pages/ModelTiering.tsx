@@ -14,7 +14,7 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 
 function ResolvedModel({ tier, models }: { tier: Tier; models: ModelInfo[] }) {
   const requested = models.find((m) => m.tier === tier);
-  const resolved = resolveModelForTier(tier);
+  const resolved = resolveModelForTier(tier, models);
 
   if (requested?.usable) {
     return (
@@ -82,7 +82,7 @@ function RoleCard({
   );
 }
 
-export default function ModelTiering() {
+export default function ModelTiering({ userId }: { userId: string }) {
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [config, setConfig] = useState<RoleTierConfig>({});
@@ -92,23 +92,25 @@ export default function ModelTiering() {
 
   useEffect(() => {
     let cancelled = false;
-    getModelTiering()
-      .then((state) => {
+    async function load() {
+      setLoading(true);
+      try {
+        const state = await getModelTiering(userId);
         if (cancelled) return;
         setRoles(state.roles);
         setModels(state.models);
         setConfig(state.config);
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setError("Could not load model tiering config.");
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    }
+    load();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [userId]);
 
   const modelsByTier = useMemo(() => {
     const grouped: Record<Tier, ModelInfo[]> = { cheap: [], standard: [], strong: [] };
@@ -120,7 +122,7 @@ export default function ModelTiering() {
     setConfig((prev) => ({ ...prev, [roleId]: tier }));
     setSaveStateByRole((prev) => ({ ...prev, [roleId]: "saving" }));
     try {
-      await updateRoleTier(roleId, tier);
+      await updateRoleTier(userId, roleId, tier);
       setSaveStateByRole((prev) => ({ ...prev, [roleId]: "saved" }));
       setTimeout(() => {
         setSaveStateByRole((prev) => (prev[roleId] === "saved" ? { ...prev, [roleId]: "idle" } : prev));
@@ -135,7 +137,8 @@ export default function ModelTiering() {
       <header className="page-header">
         <h1>Model Tiering</h1>
         <p className="subtitle">
-          Assign each agent role a cost tier. A tier with no usable model yet falls back to the cheap model.
+          Assign each agent role a cost tier for <strong>{userId}</strong>. Each user has their own tiering — a tier
+          with no usable model yet falls back to the cheap model.
         </p>
       </header>
 
@@ -186,8 +189,8 @@ export default function ModelTiering() {
           </section>
 
           <p className="mock-note">
-            Backed by a local mock, not the gateway — see admin-ui/src/api/modelTiers.ts. Changes persist only in
-            this browser.
+            Real endpoint: gateway/main.py's /v1/admin/model-tiers (GET/PATCH), backed by Postgres. A change here
+            applies to the next chat request — no redeploy needed.
           </p>
         </>
       )}

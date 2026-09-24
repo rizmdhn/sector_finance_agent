@@ -17,6 +17,11 @@ const TABS: { id: Tab; label: string }[] = [
 const USER_ID_KEY = "idx-admin-ui.user-id.v1";
 const DEFAULT_USER_ID = "demo-user";
 
+function readTab(): Tab {
+  const hash = location.hash.slice(1);
+  return TABS.some((t) => t.id === hash) ? (hash as Tab) : "chat";
+}
+
 function readUserId(): string {
   try {
     return localStorage.getItem(USER_ID_KEY) || DEFAULT_USER_ID;
@@ -27,7 +32,10 @@ function readUserId(): string {
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
-  const [tab, setTab] = useState<Tab>("chat");
+  const [tab, setTab] = useState<Tab>(readTab);
+  useEffect(() => {
+    location.hash = tab;
+  }, [tab]);
   const [userId, setUserIdState] = useState(readUserId);
   const [userDraft, setUserDraft] = useState(userId);
 
@@ -96,7 +104,7 @@ export default function App() {
       <main className="shell-main">
         {tab === "chat" && <Chat userId={userId} />}
         {tab === "memory" && <Memory userId={userId} />}
-        {tab === "model-tiering" && <ModelTiering />}
+        {tab === "model-tiering" && <ModelTiering userId={userId} />}
       </main>
     </div>
   );

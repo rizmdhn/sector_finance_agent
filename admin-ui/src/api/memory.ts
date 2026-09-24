@@ -17,6 +17,13 @@ export async function addMemory(user: string, content: string): Promise<MemoryEn
   });
 }
 
+export async function updateMemory(user: string, id: number, content: string): Promise<MemoryEntry> {
+  return apiFetch<MemoryEntry>(`/v1/memory/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ user, content }),
+  });
+}
+
 export async function deleteMemory(user: string, id: number): Promise<void> {
   await apiFetch<{ deleted: boolean }>(`/v1/memory/${id}?user=${encodeURIComponent(user)}`, {
     method: "DELETE",
