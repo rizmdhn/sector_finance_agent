@@ -4,3 +4,7 @@ strands-agents
 anthropic
 openai
 pyyaml
+opentelemetry-exporter-otlp-proto-http
+openinference-semantic-conventions
+openinference-instrumentation-anthropic
+openinference-instrumentation-openai

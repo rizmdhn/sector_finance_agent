@@ -17,12 +17,25 @@ from gateway.guardrails import (
     enforce_rate_limit,
 )
 from gateway.registry import load_registry
+from gateway.telemetry import setup_telemetry, traced_conversation
 from data.deps import get_cache
+
+setup_telemetry()
 
 app = FastAPI(title="IDX Agent Gateway")
 _auth_scheme = HTTPBearer()
 
 _registry = load_registry()
+
+
+@app.on_event("shutdown")
+def _flush_traces() -> None:
+    """Spans are batched (strands/telemetry's BatchSpanProcessor, default 5s export
+    interval) — flush explicitly on shutdown so a request handled just before the
+    process exits doesn't lose its trace to timing."""
+    from opentelemetry import trace as trace_api
+
+    trace_api.get_tracer_provider().force_flush(timeout_millis=5000)
 
 
 def _check_auth(credentials: HTTPAuthorizationCredentials = Depends(_auth_scheme)) -> None:
@@ -69,6 +82,7 @@ async def chat_completions(request: Request):
     model_entry = _registry[model_name]
     system_prompt, chat_messages = compat.split_system_prompt(messages)
     strands_messages = compat.to_strands_messages(chat_messages)
+    question = compat.latest_user_text(chat_messages)
 
     agent = _build_agent_with_fallback(model_entry)
     if system_prompt:
@@ -76,14 +90,15 @@ async def chat_completions(request: Request):
 
     if stream:
         return StreamingResponse(
-            _stream_response(agent, strands_messages, model_name),
+            _stream_response(agent, strands_messages, model_name, question, user_id),
             media_type="text/event-stream",
         )
 
-    text = await _run_to_completion(agent, strands_messages)
-    return JSONResponse(
-        compat.completion_response(compat.completion_id(), model_name, attach_disclaimer(text))
-    )
+    with traced_conversation(question, model_name, user_id) as span:
+        text = await _run_to_completion(agent, strands_messages)
+        answer = attach_disclaimer(text)
+        span.set_output(answer)
+    return JSONResponse(compat.completion_response(compat.completion_id(), model_name, answer))
 
 
 def _build_agent_with_fallback(model_entry):
@@ -103,11 +118,15 @@ async def _run_to_completion(agent, messages: list[dict]) -> str:
     return "".join(chunks)
 
 
-async def _stream_response(agent, messages: list[dict], model_name: str):
+async def _stream_response(agent, messages: list[dict], model_name: str, question: str, user_id: str):
     completion_id_ = compat.completion_id()
-    async for event in agent.stream_async(prompt=messages):
-        if "data" in event and event["data"]:
-            yield compat.sse_chunk(completion_id_, model_name, {"content": event["data"]})
+    chunks: list[str] = []
+    with traced_conversation(question, model_name, user_id) as span:
+        async for event in agent.stream_async(prompt=messages):
+            if "data" in event and event["data"]:
+                chunks.append(event["data"])
+                yield compat.sse_chunk(completion_id_, model_name, {"content": event["data"]})
+        span.set_output("".join(chunks))
     yield compat.sse_chunk(completion_id_, model_name, {}, finish_reason="stop")
     yield compat.sse_done()
 

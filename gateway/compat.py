@@ -32,6 +32,18 @@ def to_strands_messages(messages: list[dict]) -> list[Message]:
     ]
 
 
+def latest_user_text(messages: list[dict]) -> str:
+    """Extract the latest user message's text from OpenAI-shape messages (plain
+    string `content`, before `to_strands_messages` wraps it into content blocks),
+    for tracing (gateway/telemetry.py) — the OpenInference INPUT_VALUE attribute is
+    a single string, not a message list.
+    """
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return message.get("content", "") or ""
+    return ""
+
+
 def is_title_request(messages: list[dict]) -> bool:
     """Detect LibreChat's conversation-title-generation calls so they can be
     short-circuited instead of running the full agent + tools.

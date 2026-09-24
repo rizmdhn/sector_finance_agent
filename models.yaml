@@ -13,11 +13,14 @@
 models:
   - name: idx-analyst-claude
     provider: anthropic
-    model_id: TODO
+    # Haiku 4.5, not Sonnet — deliberately the cheapest current Claude model, since
+    # the user has limited Anthropic credit and this is still being verified for
+    # the first time. Swap to a Sonnet model_id once ready to spend more per call.
+    model_id: claude-haiku-4-5-20251001
     key_ref: ANTHROPIC_API_KEY
-    context_limit: 0
+    context_limit: 200000
     supports_tools: true
-    tier: standard
+    tier: cheap
     fallback: idx-analyst-gpt
 
   - name: idx-analyst-gpt

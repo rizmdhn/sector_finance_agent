@@ -11,9 +11,15 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
+    environment:
+      # Override any PHOENIX_COLLECTOR_ENDPOINT in .env (that default targets
+      # localhost, for running the gateway outside Compose) with the in-network
+      # service name — see gateway/telemetry.py.
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
     depends_on:
       - valkey
       - postgres
+      - phoenix
 
   ingest-worker:
     build:

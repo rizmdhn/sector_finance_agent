@@ -1,0 +1,6 @@
+arize-phoenix-client
+arize-phoenix-evals
+
+# phoenix_evals.py imports gateway.telemetry so judge LLM calls get traced/costed
+# the same way real gateway conversations are — install gateway's requirements too:
+#   pip install -r gateway/requirements.txt -r evals/requirements.txt

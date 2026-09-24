@@ -395,6 +395,224 @@ end-to-end as soon as a model key exists, rather than a fully-built but unverifi
   still has `model_id: TODO` for both registry entries. All 60 `data`/`analysis`
   tests still pass unaffected.
 
+## Item 11: tracing (Phoenix) + Arize eval script — verified live, no LLM involved (2026-09-24)
+
+User asked for observability so the agents are "already traced" once a real LLM key
+is added, plus an Arize-based evaluation pass. Both built and verified against a
+real, freshly-started Phoenix container this session — with zero LLM calls (a
+deliberately invalid Anthropic key was used to test the failure path), since no
+ANTHROPIC_API_KEY/OPENAI_API_KEY exists yet.
+
+- **`gateway/telemetry.py`** (new): `setup_telemetry()` configures the global OTel
+  tracer provider with an OTLP/HTTP exporter pointed at Phoenix — this is the only
+  thing needed for Strands' own spans (every `Agent` calls `get_tracer()`
+  unconditionally in `strands/agent/agent.py`) to start exporting; no per-agent
+  changes needed. `traced_conversation()` wraps each gateway request in one
+  additional span tagged with OpenInference's `input.value`/`output.value`/
+  `openinference.span.kind=AGENT` — a flat, query-friendly shape Strands' own
+  `gen_ai.*`-convention spans don't provide, and what `evals/phoenix_evals.py`
+  actually reads.
+- **Real bug found and fixed during verification, not assumed from docs**: Phoenix
+  buckets traces into projects by the `openinference.project.name` resource
+  attribute — confirmed by first trying the obvious thing (`service.name`, which is
+  what Strands' `StrandsTelemetry()` sets by default) and watching every trace land
+  under Phoenix's `"default"` project regardless of that value. Fixed by building a
+  custom `Resource` with both attributes and handing it to
+  `StrandsTelemetry(tracer_provider=...)` — which in turn required calling
+  `trace.set_tracer_provider()` explicitly, since that constructor path does *not*
+  register the provider globally on its own (only its no-arg branch does), and
+  Strands' own `Tracer` reads the global provider at construction time.
+  Re-verified after the fix: a synthetic span landed under a real
+  `idx-agent-gateway` project with exactly the expected columns.
+- `gateway/main.py`: calls `setup_telemetry()` at module import (process startup);
+  wraps both the streaming and non-streaming `chat_completions` paths in
+  `traced_conversation`; added a `shutdown` handler that force-flushes the batched
+  span exporter so a request right before process exit isn't lost to timing.
+  `gateway/compat.py::latest_user_text` extracts the question text for the span.
+- `docker-compose.yml`: `agent-gateway` now depends on `phoenix` and gets
+  `PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006` (the in-network name) instead of
+  the localhost default meant for running the gateway outside Compose.
+- **`evals/phoenix_evals.py`** (new): pulls traced conversations from Phoenix via
+  `arize-phoenix-client`, grades them with an LLM judge
+  (`arize-phoenix-evals`'s `create_classifier`/`evaluate_dataframe`) against 3
+  project-specific compliance checks (cites a date for cited figures, no buy/sell/
+  hold language, discloses missing data/unimplemented roles rather than glossing
+  over them) — deliberately not generic hallucination/toxicity templates, since
+  those don't check what this product's business doc actually requires.
+- **Real bug found and fixed here too**: `evaluate_dataframe`'s own docstring says
+  its result columns are "JSON-serialized", but a live run (with the deliberately
+  invalid key) showed `execution_details` come back as a plain `dict` already, not
+  a JSON string — `json.loads()` on it crashed with `TypeError`. Fixed with a
+  `_parsed()` helper that accepts either shape, since the score column's actual
+  shape on a successful judge call couldn't be verified without a real key.
+- Confirmed working end-to-end apart from the judge call itself: real traces
+  fetched, correct columns extracted, evaluator dispatched, and the script reports
+  "N evaluator call(s) failed" cleanly rather than crashing when the (deliberately
+  bad) judge key fails every call.
+- New deps: `gateway/requirements.txt` gained `opentelemetry-exporter-otlp-proto-http`
+  and `openinference-semantic-conventions`; new `evals/requirements.txt`
+  (`arize-phoenix-client`, `arize-phoenix-evals`). Both installed into `.venv` and
+  used for the verification above.
+
+**Not yet done**: running either the tracing or the eval script against a real
+conversation — both are blocked on the same missing `ANTHROPIC_API_KEY`/
+`OPENAI_API_KEY`/`model_id` as item 10. The `evals/promptfooconfig.yaml` placeholder
+(open item 2 below) is unrelated and still unfilled.
+
+## Item 12: first real LLM call — tracing confirmed working end to end (2026-09-24)
+
+User added a real `ANTHROPIC_API_KEY`. Before running anything, filled in
+`models.yaml`'s `idx-analyst-claude` entry (still `TODO` until now) with
+`claude-haiku-4-5-20251001` — deliberately Haiku, not Sonnet, since the user
+explicitly flagged limited Anthropic credit and this was the first-ever real call
+against this codebase; tier changed `standard` -> `cheap` to match.
+
+**Two real `.env` bugs found and fixed before the test could even run:**
+- `IDX_GATEWAY_KEY` was empty — the gateway's own auth check would reject every
+  request. Set to a local dev secret (`dev-local-gateway-key-2a9f7e1c4b` — not
+  sensitive, never leaves localhost).
+- `PHOENIX_COLLECTOR_ENDPOINT` was set to `http://phoenix:6006` (the in-Docker
+  service name) while every other `.env` value (`POSTGRES_HOST`, `VALKEY_HOST`) is
+  `localhost` — i.e. configured for running the gateway locally, not inside
+  Compose. That mismatch would have silently made tracing a no-op (DNS failure on
+  an async exporter, swallowed rather than crashing). Fixed to `http://localhost:6006`;
+  `docker-compose.yml`'s own `environment:` override (item 11) still supplies the
+  in-Docker value when the gateway itself runs in Compose.
+
+**The test**: started `uvicorn gateway.main:app` locally, confirmed `/v1/models`
+auth works, then sent exactly one minimal, deliberately tool-free question ("In one
+short sentence, what is your role?") to `idx-analyst-claude` — chosen specifically
+to avoid triggering any Sectors API tool call, so only Anthropic credit was spent,
+once. Real response came back from the Chief Portfolio Intelligence Orchestrator,
+correctly in-character and correctly appending the not-financial-advice disclaimer.
+
+**Tracing confirmed working, not just structurally correct**: queried Phoenix
+after the call and found the real conversation's `chat_completion` span (question
++ full answer, matching item 11's design) plus Strands' own detailed spans
+(`chat`, `execute_event_loop_cycle`, `invoke_agent
+chief_portfolio_intelligence_orchestrator`) — with **real token counts attached**:
+1,079 prompt tokens + 32 completion tokens = 1,111 total, correctly tagged with
+`claude-haiku-4-5-20251001`. This answers the user's actual concern directly: every
+call's real cost is now visible per-conversation in Phoenix's UI
+(`http://localhost:6006`, project `idx-agent-gateway`), not just logged as an
+opaque total.
+
+Gateway process stopped after the test (no need to leave it running). `evals/
+phoenix_evals.py` has not been run against this real trace yet — that would cost
+one more small judge call; not done without checking with the user first, per the
+same credit-consciousness this whole item was about.
+
+## Item 13: both remaining verifications run — tool-call path + real eval pass (2026-09-24)
+
+User said "run both": item 12's suggested next steps (a) and (b) together.
+
+**(b) Tool-triggering question, full multi-agent path, zero new Sectors credits:**
+Asked "Briefly, how are BBCA fundamentals looking based on its latest reported
+fiscal year?" — BBCA's `overview`/`valuation`/`financials` report sections were
+already cached from earlier sessions, so this was chosen deliberately to exercise
+the real delegation + tool-call path without spending Sectors credit. Confirmed via
+`valkey-cli keys` before/after: identical cache key set, zero new keys — the
+prediction held. The real answer correctly cited NPL/ROE/capital-adequacy/
+loan-to-deposit figures matching item 9's validated field mappings. The resulting
+Phoenix trace shows the exact delegation chain for the first time:
+`chat_completion` -> `invoke_agent chief_portfolio_intelligence_orchestrator` ->
+`execute_tool investment_research_lead` -> `invoke_agent investment_research_lead`
+-> `execute_tool analyze_fundamentals` -> final `chat`. This is the first live
+confirmation that the Chief's `Agent.as_tool()` delegation (item 10) actually works
+end to end, not just structurally.
+
+**(a) `evals/phoenix_evals.py` against real traces:** Ran with `--model
+claude-haiku-4-5-20251001` as judge (same cheap-model reasoning as item 12) against
+the 4 real/synthetic traces now in Phoenix. All 12 classifier calls (3 classifiers ×
+4 conversations) completed successfully this time.
+
+- **Real bug found and fixed while reading the output, not from docs**: the script's
+  own failure counter reported "12 evaluator call(s) failed" even though every
+  score looked correct — `evaluate_dataframe`'s docstring claims a `"success"`
+  status string; the real one observed live is `"COMPLETED"`. Fixed the check to
+  match on the real value (and added `"DID NOT RUN"` as a failure state, seen
+  earlier in item 11's broken-key test). Re-ran after the fix: no false failure
+  message.
+- **A genuine, actionable finding from the eval itself** (not a script bug): the
+  BBCA fundamentals answer was graded `cites_evidence_date: undated` — the answer
+  cited NPL/ROE/capital figures without stating the fiscal year, even though
+  `analyze_fundamentals`'s own output includes `fiscal_year: 2025`. This is exactly
+  the kind of gap section 5's "state the fiscal year or as_of date" requirement is
+  meant to catch, and `gateway/roles/investment_research.py`'s system prompt
+  already says to do this — worth tightening that prompt (or adding a stricter
+  instruction) since the model isn't reliably following it yet. Not fixed this
+  session — flagged as a real finding for whoever iterates on the prompt next.
+- `--log-annotations` tested too: 12 annotations written back to Phoenix and
+  independently re-read via `get_span_annotations_dataframe` to confirm they
+  persisted correctly against the right spans.
+
+Gateway stopped after both tests. All 60 `data`/`analysis` tests still pass,
+unaffected.
+
+## Item 14: found and fixed a real tracing gap — eval judge calls were invisible (2026-09-24)
+
+User reported a real discrepancy: Phoenix showed ~8.3k tokens tracked total (item 13's
+5 real gateway LLM calls, confirmed by summing `attributes.llm.token_count.total`
+across all `chat` spans), but their own Anthropic dashboard showed **32k tokens /
+$0.05** actually billed. The ~24k gap was traced to a real bug, not user error.
+
+- **Root cause, confirmed live**: `evals/phoenix_evals.py` (run twice in item 13 —
+  24 real judge calls total: 3 classifiers × 4 conversations × 2 runs) never called
+  `gateway/telemetry.py::setup_telemetry()`. It's a standalone script, not part of
+  the gateway process, so nothing configured its OpenTelemetry tracer provider —
+  every one of those 24 real, billed Anthropic calls went completely untracked, in
+  any project. Confirmed by checking Phoenix's project list before the fix: only
+  `idx-agent-gateway` and `default` existed; the eval script's calls appeared
+  nowhere.
+- **Fix**: `evals/phoenix_evals.py` now calls `setup_telemetry()` itself, under a
+  separate `idx-agent-evals` Phoenix project by default (`PHOENIX_PROJECT_NAME`
+  override) so judge-call cost stays visually distinct from real user conversations
+  while still being fully tracked. `phoenix.evals` (like Strands) auto-instruments
+  against whatever global tracer provider is configured
+  (`phoenix.evals.tracing.get_tracer()`), so no other wiring was needed for the
+  calls to start appearing at all.
+- **Second gap found immediately after fixing the first, by actually checking, not
+  assuming success**: the judge call *did* now appear in Phoenix (real input/output
+  visible) but with **no token-count attributes at all** — `phoenix.evals`' own
+  span (`LLM.generate_object`) doesn't capture usage; only the underlying SDK call
+  does. Fixed by adding `openinference-instrumentation-anthropic` (and
+  `-openai`, for symmetry, since the same gap would hit an OpenAI-judged run) to
+  `setup_telemetry()` — this patches the Anthropic/OpenAI SDK clients directly to
+  record real token usage on every call, Strands-orchestrated or not. Re-verified:
+  a `messages.create` child span now carries real `attributes.llm.token_count.*`
+  (e.g. 918 prompt + 178 completion = 1,096 for one judge call).
+- Added `sys.path.insert(...)` to `evals/phoenix_evals.py` (matching
+  `scripts/manage.py`'s existing pattern) — needed once the script started
+  importing `gateway.telemetry`, since running it directly (`python
+  evals/phoenix_evals.py`) doesn't put the repo root on `sys.path` otherwise.
+- Verified the complete fixed pipeline end to end with `--limit 1` (3 real calls,
+  minimal spend): all 3 classifiers succeeded, all 3 now show up in Phoenix's
+  `idx-agent-evals` project with real token counts (1,101 + 1,098 + 1,133 = 4,428
+  tokens for that run — visible, not a black box).
+- New deps: `gateway/requirements.txt` gained `openinference-instrumentation-anthropic`
+  and `openinference-instrumentation-openai`. `evals/requirements.txt` now notes it
+  needs `gateway/requirements.txt` installed alongside it, since the eval script
+  imports `gateway.telemetry`.
+
+**Net effect**: every Anthropic/OpenAI call this codebase can make — gateway
+conversations AND eval judge calls — is now traced with real token counts, in one
+of two clearly-separated Phoenix projects. This was a genuine, user-caught gap, not
+a hypothetical one; item 13's claim that the eval run was "small" undercounted its
+real cost by not accounting for the fact that it wasn't traced at all.
+
+## Item 15: eval results now default to Phoenix's UI, not just terminal output (2026-09-24)
+
+User asked for a UI a non-technical user could read eval results in. Phoenix
+already provides exactly this once annotations are logged (confirmed via its
+GraphQL schema — `getProjectByName`/`annotationConfigs` back the per-project
+annotation summaries and per-trace annotation panels its UI renders) — the gap was
+that `--log-annotations` was opt-in. Flipped: `evals/phoenix_evals.py` now logs
+annotations **by default** (`--no-log-annotations` to skip). A reviewer can now open
+`http://localhost:6006`, pick the `idx-agent-gateway` project, and read
+`cites_evidence_date`/`no_investment_recommendation`/`discloses_missing_data`
+results directly in the trace list and per-trace detail view — no script output,
+no separate dashboard to build.
+
 ## Not started / open
 
 1. ~~`db.init_schema()` is never called anywhere~~ — done for real: 11 tables exist in
@@ -439,18 +657,32 @@ end-to-end as soon as a model key exists, rather than a fully-built but unverifi
     architecturally different from the other two: it needs to review the *Chief's*
     output, not be called as an ordinary delegated sub-agent, so it likely doesn't
     fit the same `Agent.as_tool()` pattern used for Investment Research Lead.
-12. No real LLM has been used against this codebase at all this session —
-    `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are both unset and `models.yaml` still has
-    `model_id: TODO` for both entries. Everything in item 10 is verified structurally
-    (agents construct, tools wire up correctly) but not behaviorally.
+12. ~~No real LLM has been used against this codebase at all this session~~ — done,
+    item 12: one real Haiku call, tracing confirmed with real token counts.
+    `idx-analyst-gpt` (OpenAI) still has `model_id: TODO` and no key — untested.
+13. ~~`evals/phoenix_evals.py` hasn't been run against any real conversation~~ — done,
+    item 13. Found and surfaced a real prompt-following gap: Investment Research
+    Lead's answers aren't reliably citing the fiscal year despite the system prompt
+    asking for it. Not fixed yet.
+14. ~~A question that actually triggers the multi-agent + tool-call path hasn't been
+    run~~ — done, item 13, and for zero Sectors credit (BBCA was already fully
+    cached). A question needing a symbol that is NOT already cached — the one path
+    that would spend real Sectors credit in this multi-agent build — still hasn't
+    been tried.
+15. Investment Research Lead's system prompt says to state the fiscal year for
+    every cited figure, but item 13's eval run showed it doesn't reliably do so.
+    Worth tightening the prompt (e.g. an explicit instruction to state the fiscal
+    year for every figure in the tool's own output, not left to the answer's
+    prose) and re-testing with the same eval script.
 
 ## Suggested next step
-The user picked "calculation engine first" (6), "start wiring real data" (7-9), then
-"start building the agent" (10, Chief + Investment Research Lead). The most useful
-next step is getting a real model key and `model_id` in so item 10 can actually be
-run and observed for the first time — everything about it is currently verified only
-structurally. After that, either continue the 5-role build (Portfolio Risk Lead is
-the natural next role — its tools already exist from item 8, just unattached) or
-spend a little more credit validating item 9's fundamentals field mappings against a
-second bank/non-bank issuer before trusting them generally. Worth confirming with the
-user which they'd rather do next.
+Everything through item 13 is now verified live: real LLM call, real tracing with
+real token counts, real multi-agent tool-call delegation (zero Sectors credit, since
+BBCA was cached), and a real eval pass that already surfaced one genuine prompt gap
+(fiscal-year citation, item 15). The concrete, small next step is fixing that prompt
+gap and re-running the same eval to confirm it's resolved — cheap, and closes the
+loop on work already in flight. Bigger next steps, worth checking with the user
+before picking one: continue the 5-role build (Portfolio Risk Lead is the natural
+next role, tools already exist from item 8), validate item 9's fundamentals field
+mappings against a second bank/non-bank issuer, or try a symbol that isn't cached
+yet to see the multi-agent path actually spend a Sectors credit (item 14).

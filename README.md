@@ -217,12 +217,80 @@ Both roles currently share whatever model is selected via `/v1/models` — per-r
 model tiering (business doc section 8: cheaper models for routine coordination,
 stronger ones for disputed conflicts) is not implemented.
 
-**Not yet tested against a live LLM** — no `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` is
-set and `models.yaml` still has `model_id: TODO` for both entries. Verified so far:
-both agents construct correctly and wire their tools/sub-agent as expected (a dry
-run with a placeholder key and model id, no live network call) and the existing
-`analysis`/`data` test suite (60 tests) still passes. Add a real key and a real
-`model_id` to actually run a conversation.
+**Tested against a live LLM** — `models.yaml`'s `idx-analyst-claude` entry uses
+`claude-haiku-4-5-20251001` (deliberately the cheapest current Claude model, given a
+limited credit budget). A real conversation, including one that exercised the full
+Chief -> Investment Research Lead -> tool-call path, has been run and traced
+end to end — see PROGRESS.md items 12-14. `idx-analyst-gpt` (OpenAI) still has
+`model_id: TODO` and no key — untested.
+
+## Observability and evaluation (Arize Phoenix)
+
+`docker-compose.yml`'s `phoenix` service is wired up and verified working, not just
+configured:
+
+```
+docker compose up -d phoenix        # or it comes up with the full stack
+uvicorn gateway.main:app --reload   # already calls gateway.telemetry.setup_telemetry()
+```
+
+Every gateway request is traced automatically, with no further wiring needed:
+- Strands' own spans (LLM calls, tool calls, the Chief's delegation to Investment
+  Research Lead) export via OpenTelemetry to Phoenix's OTLP endpoint — confirmed
+  live: a real conversation's trace shows the exact delegation chain
+  (`invoke_agent chief_portfolio_intelligence_orchestrator` ->
+  `execute_tool investment_research_lead` -> `invoke_agent investment_research_lead`
+  -> `execute_tool analyze_fundamentals`) with real token counts on every LLM call.
+- One wrapping span per request (`gateway.telemetry.traced_conversation`), tagged
+  with OpenInference's `input.value`/`output.value` — the flat shape
+  `evals/phoenix_evals.py` reads, as opposed to Strands' more detailed `gen_ai.*`
+  spans.
+- Real gateway conversations land under the **`idx-agent-gateway`** Phoenix
+  project (`http://localhost:6006`); Phoenix buckets by an
+  `openinference.project.name` resource attribute, not `service.name`.
+
+**Evaluation**: `evals/phoenix_evals.py` pulls real traced conversations from
+Phoenix and grades them with an LLM judge against this project's own compliance
+rules (cites a date for cited figures, never gives a buy/sell/hold recommendation,
+discloses missing data/unimplemented roles) rather than generic hallucination
+templates. Different tool from `evals/promptfooconfig.yaml` (fixed questions at the
+live gateway, catches tool-calling failures) — this one grades conversations that
+already happened.
+
+```
+pip install -r gateway/requirements.txt -r evals/requirements.txt
+export ANTHROPIC_API_KEY=...   # whichever provider judges the answers
+python evals/phoenix_evals.py --provider anthropic --model claude-haiku-4-5-20251001
+```
+
+Results are written back to Phoenix as span annotations **by default** (pass
+`--no-log-annotations` to skip this) — so a non-technical reviewer never needs this
+script's terminal output at all: open `http://localhost:6006`, pick the
+`idx-agent-gateway` project, and the trace list itself shows a column per
+classifier (`cites_evidence_date`, `no_investment_recommendation`,
+`discloses_missing_data`) with each conversation's label; clicking into a trace
+shows the judge's full explanation for each one. Confirmed live — annotations
+logged by a real run were independently re-read back via
+`Client().spans.get_span_annotations_dataframe()` and matched what was written.
+
+Judge LLM calls land under a **separate `idx-agent-evals`** Phoenix project (kept
+distinct from real user conversations, override with `PHOENIX_PROJECT_NAME`) — this
+script calls `setup_telemetry()` itself since it's a standalone process, not part of
+the gateway. **This split exists because of a real bug found via a user's own
+Anthropic dashboard**: an early run showed only ~8.3k tokens tracked in Phoenix
+against ~32k actually billed by Anthropic — the eval script's judge calls were
+completely untraced. Fixed by wiring `setup_telemetry()` into the script and adding
+`openinference-instrumentation-anthropic`/`-openai` (patches the SDK clients
+directly for token-usage capture, since `phoenix.evals`' own spans don't carry it
+without that). Re-verified after the fix: every judge call now shows real token
+counts in Phoenix. See PROGRESS.md item 14 for the full transcript — worth reading
+before assuming any token count Phoenix reports is the complete picture for a new
+code path that hasn't been checked against a real provider dashboard yet.
+
+Actual finding from a real eval run, not a placeholder: `cites_evidence_date` graded
+one BBCA answer `undated` — Investment Research Lead's system prompt asks for a
+fiscal year on every cited figure, but the model didn't reliably include one. Not
+fixed yet (PROGRESS.md item 15).
 
 ## Running the stack
 

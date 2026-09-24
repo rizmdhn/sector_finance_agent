@@ -49,11 +49,22 @@ def build_model(entry: ModelEntry) -> Model:
 
     if entry.provider == "anthropic":
         from strands.models.anthropic import AnthropicModel
+        from strands.models.model import CacheConfig
 
+        # Prompt caching, NOT answer caching: every call still gets a fresh, real
+        # LLM response — only the repeated fixed prefix (system prompt + tool
+        # schemas, both static per role) gets billed at Anthropic's cached-read
+        # rate on every call after the first within the TTL, instead of full input
+        # price. Confirmed live (see PROGRESS.md): a second identical-prefix call
+        # showed real cache_read_input_tokens in its usage, at ~1/10th the cost of
+        # an uncached prompt token. This is a much better fit than an answer cache
+        # for "ask about the same company again" — it never risks serving a stale
+        # or subtly-wrong cached answer, since the model always actually runs.
         return AnthropicModel(
             client_args={"api_key": api_key},
             model_id=entry.model_id,
             max_tokens=4096,
+            cache_config=CacheConfig(strategy="anthropic", system_prompt_ttl=True, tools_ttl=True),
         )
 
     if entry.provider == "openai":
