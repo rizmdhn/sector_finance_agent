@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r gateway/requirements.txt -r data/requirements.
 
 COPY gateway gateway
 COPY data data
+COPY analysis analysis
 COPY models.yaml models.yaml
 
 CMD ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]

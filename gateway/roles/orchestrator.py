@@ -64,7 +64,7 @@ from data.db import Database
 from data.memory_store import PostgresUserMemoryStore
 from data.session_repository import ValkeySessionRepository
 from gateway.bounded_agent import BoundedAgent
-from gateway.registry import ModelEntry, build_model
+from gateway.registry import ModelEntry, build_model, select_for_tier
 from gateway.roles.independent_risk_officer import build_independent_risk_officer
 from gateway.roles.investment_research import build_investment_research_lead
 from gateway.roles.market_intelligence import build_market_intelligence_lead
@@ -81,6 +81,40 @@ AGENT_ID = "chief_portfolio_intelligence_orchestrator"
 # no exception) rather than erroring, so a legitimately complex multi-specialist
 # question still gets whatever partial answer was assembled up to the cap.
 DEFAULT_LIMITS = Limits(turns=40, total_tokens=400_000)
+
+# Per-user, per-role model tiering (business doc section 8: "routine coordination
+# should use modest reasoning capacity... more capable models reserved for
+# difficult conflicts"). Every role defaults to "cheap" — real overrides live in
+# Postgres, keyed by (user_id, role_id) (data/schema.sql's role_tier_config, read
+# fresh by resolve_role_tiers() below on every build_agent() call using THAT
+# request's user_id, so each user's own choice takes effect on their own next
+# request, no redeploy) via gateway/main.py's /v1/admin/model-tiers endpoints.
+# This dict is only the fallback when a user has no row for a role yet.
+# independent_risk_and_evidence_officer is the natural
+# first candidate to move to "strong" — it is the role the business doc's
+# "difficult conflicts" language describes (it's the one specialist whose job is
+# to catch what another role got wrong), and the Chief already calls it
+# selectively rather than on every question, so a costlier model there doesn't
+# multiply into every single request. `select_for_tier` (gateway/registry.py)
+# silently falls back to the request's own model_entry when a tier has no real
+# model registered — moot now that models.yaml has real standard/strong entries
+# (see PROGRESS.md item 36), but still the safety net if that ever regresses.
+DEFAULT_ROLE_TIERS: dict[str, str] = {
+    "chief": "cheap",
+    "investment_research_lead": "cheap",
+    "portfolio_risk_lead": "cheap",
+    "market_and_event_intelligence_lead": "cheap",
+    "independent_risk_and_evidence_officer": "cheap",
+}
+
+
+def resolve_role_tiers(db: Database, user_id: str) -> dict[str, str]:
+    """DEFAULT_ROLE_TIERS with this user's own Postgres overrides applied on top —
+    each user_id gets independent tiering, same scoping as user_memory. One small
+    query per build_agent() call — cheap enough not to cache, and caching it would
+    mean an admin-ui tier change not taking effect until a cache TTL rolls over,
+    defeating the point of making this live-editable."""
+    return {**DEFAULT_ROLE_TIERS, **db.get_role_tiers(user_id)}
 
 SYSTEM_PROMPT = """\
 You are the Chief Portfolio Intelligence Orchestrator for an IDX (Indonesia Stock \
@@ -183,27 +217,40 @@ def build_agent(
     cache: Cache,
     user_id: str,
     session_id: str,
+    registry: dict[str, ModelEntry] | None = None,
 ) -> Agent:
     """Builds the Chief with all four specialists wired in as agent-as-tools, plus
     session (Valkey, short-term) and memory (Postgres, long-term) attached.
 
-    All roles currently share the same model_entry — per-role model tiering
-    (section 8: "routine coordination should use modest reasoning capacity... more
-    capable models reserved for difficult conflicts") is not implemented yet; see
-    PROGRESS.md.
+    `model_entry` is the model the request asked for (from LibreChat's model
+    picker) and stays each role's default. `registry` (optional — omitted by
+    existing callers like the eval scripts, which don't need tiering) lets
+    resolve_role_tiers()'s live Postgres config override individual roles to a
+    different tier's model, via `select_for_tier`; passing `registry=None` skips
+    the DB lookup entirely and every role uses `model_entry`, same as before
+    tiering existed.
 
     `user_id` scopes long-term memory (a fact saved by one user is never visible to
-    another); `session_id` scopes the short-term conversation restored by the
-    session manager — see gateway/main.py for how each request decides what these
-    are and whether to send full message history or just the newest turn.
+    another) AND model tiering (each user picks their own role->tier config, see
+    resolve_role_tiers()); `session_id` scopes the short-term conversation restored
+    by the session manager — see gateway/main.py for how each request decides what
+    these are and whether to send full message history or just the newest turn.
     """
     if not model_entry.supports_tools:
         raise ValueError(f"model {model_entry.name} does not support tool calling")
 
-    investment_research_lead = build_investment_research_lead(model_entry)
-    portfolio_risk_lead = build_portfolio_risk_lead(model_entry)
-    market_intelligence_lead = build_market_intelligence_lead(model_entry)
-    independent_risk_officer = build_independent_risk_officer(model_entry)
+    role_tiers = resolve_role_tiers(db, user_id) if registry is not None else None
+
+    def model_for(role: str) -> ModelEntry:
+        if registry is None or role_tiers is None:
+            return model_entry
+        return select_for_tier(registry, role_tiers[role], model_entry)
+
+    investment_research_lead = build_investment_research_lead(model_for("investment_research_lead"))
+    portfolio_risk_lead = build_portfolio_risk_lead(model_for("portfolio_risk_lead"))
+    market_intelligence_lead = build_market_intelligence_lead(model_for("market_and_event_intelligence_lead"))
+    independent_risk_officer = build_independent_risk_officer(model_for("independent_risk_and_evidence_officer"))
+    chief_model_entry = model_for("chief")
 
     session_manager = RepositorySessionManager(
         session_id=session_id, session_repository=ValkeySessionRepository(cache)
@@ -222,7 +269,7 @@ def build_agent(
     return BoundedAgent(
         name=AGENT_ID,
         agent_id=AGENT_ID,
-        model=build_model(model_entry),
+        model=build_model(chief_model_entry),
         tools=[
             investment_research_lead.as_tool(
                 name=investment_research_lead.name,

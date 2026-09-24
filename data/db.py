@@ -319,12 +319,15 @@ class Database:
 
     # -- User memory, long-term (data/memory_store.py::PostgresUserMemoryStore) ----
 
-    def add_user_memory(self, user_id: str, content: str, metadata: dict | None) -> None:
+    def add_user_memory(self, user_id: str, content: str, metadata: dict | None) -> dict:
         with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO user_memory (user_id, content, metadata) VALUES (%s, %s, %s)",
+            return conn.execute(
+                """
+                INSERT INTO user_memory (user_id, content, metadata) VALUES (%s, %s, %s)
+                RETURNING id, content, metadata, created_at
+                """,
                 (user_id, content, psycopg.types.json.Json(metadata) if metadata is not None else None),
-            )
+            ).fetchone()
 
     def search_user_memory(self, user_id: str, query: str | None, limit: int) -> list[dict]:
         """Postgres full-text search (`to_tsvector`/`plainto_tsquery`) on `content`,
@@ -360,7 +363,7 @@ class Database:
                 or_query = " | ".join(words)
                 return conn.execute(
                     """
-                    SELECT content, metadata, created_at FROM user_memory
+                    SELECT id, content, metadata, created_at FROM user_memory
                     WHERE user_id = %s AND to_tsvector('english', content) @@ to_tsquery('english', %s)
                     ORDER BY ts_rank(to_tsvector('english', content), to_tsquery('english', %s)) DESC
                     LIMIT %s
@@ -369,9 +372,53 @@ class Database:
                 ).fetchall()
             return conn.execute(
                 """
-                SELECT content, metadata, created_at FROM user_memory
+                SELECT id, content, metadata, created_at FROM user_memory
                 WHERE user_id = %s
                 ORDER BY created_at DESC LIMIT %s
                 """,
                 (user_id, limit),
             ).fetchall()
+
+    def delete_user_memory(self, user_id: str, memory_id: int) -> bool:
+        """Scoped to `user_id` as well as `id` so one user can never delete
+        another's memory row by guessing/iterating ids."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM user_memory WHERE id = %s AND user_id = %s",
+                (memory_id, user_id),
+            )
+            return cur.rowcount > 0
+
+    def update_user_memory(self, user_id: str, memory_id: int, content: str) -> dict | None:
+        """Same `(id, user_id)` scoping as delete_user_memory. Content only, not
+        metadata — `created_at` stays the original write time (this edits a fact,
+        it doesn't re-date it); `metadata`'s `kind` tag stays whatever it was, an
+        edit doesn't reclassify it. Returns None if no row matched, same shape as
+        delete_user_memory's bool return, so the caller can 404 the same way."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                UPDATE user_memory SET content = %s WHERE id = %s AND user_id = %s
+                RETURNING id, content, metadata, created_at
+                """,
+                (content, memory_id, user_id),
+            ).fetchone()
+
+    # -- Per-user model tier overrides (gateway/roles/orchestrator.py) ----------
+
+    def get_role_tiers(self, user_id: str) -> dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT role_id, tier FROM role_tier_config WHERE user_id = %s", (user_id,)
+            ).fetchall()
+            return {row["role_id"]: row["tier"] for row in rows}
+
+    def set_role_tier(self, user_id: str, role_id: str, tier: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO role_tier_config (user_id, role_id, tier) VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, role_id) DO UPDATE SET tier = EXCLUDED.tier, updated_at = now()
+                """,
+                (user_id, role_id, tier),
+            )

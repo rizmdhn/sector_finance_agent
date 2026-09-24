@@ -132,3 +132,18 @@ CREATE TABLE IF NOT EXISTS user_memory (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS user_memory_user_id_idx ON user_memory (user_id, created_at DESC);
+
+-- Per-user, per-role model tier overrides (gateway/roles/orchestrator.py's
+-- DEFAULT_ROLE_TIERS/resolve_role_tiers, gateway/registry.py's select_for_tier).
+-- Keyed by (user_id, role_id) — each user picks their own tiering, same user_id
+-- as user_memory/sessions, not a single system-wide setting. Only rows that
+-- differ from DEFAULT_ROLE_TIERS ("cheap" for every role) need to exist — read
+-- fresh on every build_agent() call, so a change takes effect on that user's
+-- next request, no redeploy.
+CREATE TABLE IF NOT EXISTS role_tier_config (
+    user_id     TEXT NOT NULL,
+    role_id     TEXT NOT NULL,
+    tier        TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, role_id)
+);

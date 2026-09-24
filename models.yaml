@@ -12,10 +12,15 @@
 #                  ROLE_TIERS map. A tier with no real (non-TODO) model_id below is
 #                  silently skipped and every role asking for it falls back to
 #                  whatever model the request itself picked — see ROLE_TIERS'
-#                  docstring. Only `cheap` is real today (2026-09-24); `standard`
-#                  and `strong` are both placeholders until there's credit to spend
-#                  lighting one up.
+#                  docstring. `cheap`/`standard`/`strong` are all real Anthropic
+#                  models as of 2026-09-24 (item 36) — whether any role actually
+#                  runs on `standard`/`strong` is still a separate, deliberate
+#                  choice in ROLE_TIERS (every role defaults to `cheap`).
 #   fallback       name of the registry entry to retry on provider errors
+#   effort         optional, anthropic only: output_config.effort ("low".."max") —
+#                  thinking depth/spend WITHIN this model, distinct from tier
+#                  (which model). Omit for Haiku 4.5 — it errors if this field is
+#                  present at all, even unset/default.
 
 models:
   - name: idx-analyst-claude
@@ -38,18 +43,33 @@ models:
     supports_tools: true
     tier: standard
     fallback: null
+    # Still a placeholder (unrelated to the two real Anthropic tiers below) —
+    # select_for_tier skips it automatically (model_id stays TODO), so it never
+    # competes with idx-analyst-claude-sonnet for the "standard" tier.
 
-  # Not yet activated — model_id is a placeholder on purpose (select_for_tier skips
-  # it) until the user decides to spend credit on it. Intended for
-  # independent_risk_and_evidence_officer (see ROLE_TIERS in
-  # gateway/roles/orchestrator.py): to turn it on, set model_id to a real Sonnet
-  # model id, name a real fallback below, and bump that one ROLE_TIERS entry from
-  # "cheap" to "strong" — nothing else needs to change.
-  - name: idx-analyst-claude-strong
+  - name: idx-analyst-claude-sonnet
     provider: anthropic
-    model_id: TODO
+    model_id: claude-sonnet-5
     key_ref: ANTHROPIC_API_KEY
-    context_limit: 200000
+    context_limit: 1000000
+    supports_tools: true
+    tier: standard
+    fallback: idx-analyst-claude
+    # No effort override — Sonnet 5's own default (equivalent to "high") applies.
+
+  # Recommended over "Sonnet 5 at max effort" for this tier (see PROGRESS.md item
+  # 36): effort only deepens thinking WITHIN a model, Opus is a genuinely more
+  # capable model — closer to what "strong" / "difficult conflicts" actually
+  # means per ROLE_TIERS' own comment. ~2.5x Sonnet 5's price ($5/$25 vs $2/$10
+  # per 1M tokens), acceptable here since this tier is only reachable by
+  # independent_risk_and_evidence_officer, which the Chief already calls
+  # selectively, not on every question.
+  - name: idx-analyst-claude-opus
+    provider: anthropic
+    model_id: claude-opus-5
+    key_ref: ANTHROPIC_API_KEY
+    context_limit: 1000000
     supports_tools: true
     tier: strong
-    fallback: idx-analyst-claude
+    fallback: idx-analyst-claude-sonnet
+    effort: max

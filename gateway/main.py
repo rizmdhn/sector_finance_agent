@@ -3,12 +3,15 @@
 See idx_agent_infrastructure_diagrams_md.md sections 2-4.
 """
 
+import hmac
 import os
+import secrets
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from gateway import compat
 from gateway.agent import build_agent
@@ -17,12 +20,16 @@ from gateway.guardrails import (
     attach_disclaimer,
     enforce_rate_limit,
 )
-from gateway.registry import load_registry
+from gateway.registry import PLACEHOLDER_MODEL_ID, load_registry
+from gateway.roles.orchestrator import DEFAULT_ROLE_TIERS, resolve_role_tiers
 from gateway.telemetry import setup_telemetry, traced_conversation
 from data.deps import get_cache, get_db
 from data.session_repository import ValkeySessionRepository
 
 SESSION_HEADER = "X-Session-Id"
+
+ADMIN_SESSION_COOKIE = "admin_session"
+ADMIN_SESSION_TTL_SECONDS = 7 * 24 * 3600
 
 setup_telemetry()
 
@@ -48,14 +55,75 @@ def _check_auth(credentials: HTTPAuthorizationCredentials = Depends(_auth_scheme
         raise HTTPException(status_code=401, detail="invalid gateway key")
 
 
+class LoginRequest(BaseModel):
+    password: str
+
+
+@app.post("/v1/auth/login")
+def login(body: LoginRequest, response: Response) -> dict:
+    """Session-cookie login for a human at admin-ui — separate from _check_auth's
+    shared bearer key, which authenticates *callers* (admin-ui's own nginx,
+    LibreChat), not a person: anyone who loaded admin-ui previously got full
+    access with no login at all, since nginx injected that key for every request
+    regardless of who was looking at the page. One admin password, not a users
+    table — this panel has exactly one operator; a real accounts system is a
+    bigger, separate feature to build if that changes (see PROGRESS.md).
+    """
+    try:
+        enforce_rate_limit(get_cache(), "admin-login", limit_per_minute=5)
+    except RateLimitExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    if not hmac.compare_digest(body.password, os.environ["ADMIN_PASSWORD"]):
+        raise HTTPException(status_code=401, detail="wrong password")
+
+    token = secrets.token_urlsafe(32)
+    get_cache().set(f"admin_session:{token}", True, ttl=ADMIN_SESSION_TTL_SECONDS)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        token,
+        max_age=ADMIN_SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="strict",
+        path="/",
+        # Not `secure=True`: nothing in this repo terminates TLS yet (see
+        # docker-compose.yml) — flip this once a real deployment sits behind HTTPS.
+    )
+    return {"ok": True}
+
+
+@app.post("/v1/auth/logout")
+def logout(response: Response, admin_session: str | None = Cookie(default=None)) -> dict:
+    if admin_session:
+        get_cache().delete(f"admin_session:{admin_session}")
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/v1/auth/verify")
+def verify_session(admin_session: str | None = Cookie(default=None)) -> dict:
+    """No `_check_auth` dependency — this endpoint IS the auth check. Used two
+    ways: by nginx's `auth_request` (admin-ui/nginx.conf.template) to gate every
+    `/api/` request before proxying it anywhere, and directly by the frontend on
+    load to ask "am I already logged in"."""
+    if not admin_session or get_cache().get(f"admin_session:{admin_session}") is None:
+        raise HTTPException(status_code=401, detail="not logged in")
+    return {"ok": True}
+
+
 @app.get("/v1/models", dependencies=[Depends(_check_auth)])
 async def list_models() -> dict:
-    """Return the model names LibreChat can select from."""
+    """Return the model names LibreChat can select from. Registry entries with a
+    placeholder model_id (models.yaml's still-TODO `standard`/`strong` slots — see
+    that file) are excluded: they exist only so gateway/registry.py's
+    select_for_tier can find them for per-role tiering, and would error if a user
+    picked one directly as the top-level model."""
     return {
         "object": "list",
         "data": [
             {"id": name, "object": "model", "owned_by": "idx-agent"}
-            for name in _registry
+            for name, entry in _registry.items()
+            if entry.model_id != PLACEHOLDER_MODEL_ID
         ],
     }
 
@@ -121,12 +189,19 @@ async def chat_completions(request: Request):
 
 def _build_agent_with_fallback(model_entry, *, user_id: str, session_id: str):
     try:
-        return build_agent(model_entry, db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id)
+        return build_agent(
+            model_entry, db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id, registry=_registry
+        )
     except Exception:
         if not model_entry.fallback:
             raise
         return build_agent(
-            _registry[model_entry.fallback], db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id
+            _registry[model_entry.fallback],
+            db=get_db(),
+            cache=get_cache(),
+            user_id=user_id,
+            session_id=session_id,
+            registry=_registry,
         )
 
 
@@ -139,16 +214,146 @@ async def _run_to_completion(agent, messages: list[dict]) -> str:
 
 
 async def _stream_response(agent, messages: list[dict], model_name: str, question: str, user_id: str):
+    """Confirmed live (2026-09-24) that Strands' stream_async() exposes which top-
+    level tool the Chief is currently calling via event["current_tool_use"]["name"]
+    — for this agent that's always one of the 4 specialists or search_memory/
+    add_memory, since those are the Chief's only tools. Surfaced here as a
+    non-standard `step` field alongside the normal OpenAI `content` delta field;
+    an OpenAI-compatible client (LibreChat) just won't recognize the extra key and
+    ignores it, admin-ui's own Chat screen renders it as a live step label. Only
+    emitted on an actual change, not every delta — current_tool_use repeats for
+    every streamed fragment of the same tool call's arguments.
+
+    Deliberately stops at this level: a specialist's OWN internal tool calls (e.g.
+    investment_research_lead calling analyze_fundamentals) are nested inside a
+    `tool_stream_event` wrapper and not unpacked here — which specialist is
+    being consulted is the meaningful signal to show a user, not which of
+    Sectors' internal endpoints it happens to be hitting.
+    """
     completion_id_ = compat.completion_id()
     chunks: list[str] = []
+    last_step: str | None = None
     with traced_conversation(question, model_name, user_id) as span:
         async for event in agent.stream_async(prompt=messages):
+            tool_name = (event.get("current_tool_use") or {}).get("name")
+            if tool_name and tool_name != last_step:
+                last_step = tool_name
+                yield compat.sse_chunk(completion_id_, model_name, {"step": tool_name})
             if "data" in event and event["data"]:
                 chunks.append(event["data"])
                 yield compat.sse_chunk(completion_id_, model_name, {"content": event["data"]})
         span.set_output("".join(chunks))
     yield compat.sse_chunk(completion_id_, model_name, {}, finish_reason="stop")
     yield compat.sse_done()
+
+
+class AddMemoryRequest(BaseModel):
+    user: str
+    content: str
+    metadata: dict | None = None
+
+
+class UpdateMemoryRequest(BaseModel):
+    user: str
+    content: str
+
+
+@app.get("/v1/memory", dependencies=[Depends(_check_auth)])
+def list_memory(user: str, limit: int = 100) -> dict:
+    """List a user's long-term memory facts (data/memory_store.py), newest first.
+    Real endpoint, not one of the model's own tools — built so a UI can show what's
+    remembered about a user without going through a chat turn. Scoped to `user`
+    exactly like /v1/chat/completions' `user` field. Protected two ways in
+    practice: the shared bearer key here (any caller that has it can read any
+    user's memory by naming their id), plus — for admin-ui specifically — nginx's
+    `auth_request` gate in front of the whole `/api/` proxy, requiring a real admin
+    login (see login()/verify_session() above) before a browser ever reaches this
+    far. Still not real per-user auth (one admin, not one login per end user) —
+    acceptable for this project's scope (see PROGRESS.md).
+    """
+    rows = get_db().search_user_memory(user, None, limit)
+    return {"data": [_serialize_memory_row(row) for row in rows]}
+
+
+@app.post("/v1/memory", dependencies=[Depends(_check_auth)])
+def add_memory(body: AddMemoryRequest) -> dict:
+    """Add a memory fact directly, bypassing the model — lets a UI let the user
+    record a fact themselves rather than only through add_memory's tool calls
+    mid-chat."""
+    row = get_db().add_user_memory(body.user, body.content, body.metadata)
+    return _serialize_memory_row(row)
+
+
+@app.patch("/v1/memory/{memory_id}", dependencies=[Depends(_check_auth)])
+def update_memory(memory_id: int, body: UpdateMemoryRequest) -> dict:
+    """Edit a fact's content in place — same `(id, user)` scoping as delete, so
+    one user can't edit another's fact by guessing an id. Doesn't touch `metadata`
+    (the `kind` tag stays whatever it was) or `created_at` (this corrects a fact,
+    it doesn't re-date it)."""
+    row = get_db().update_user_memory(body.user, memory_id, body.content)
+    if row is None:
+        raise HTTPException(status_code=404, detail="memory not found for this user")
+    return _serialize_memory_row(row)
+
+
+@app.delete("/v1/memory/{memory_id}", dependencies=[Depends(_check_auth)])
+def delete_memory(memory_id: int, user: str) -> dict:
+    deleted = get_db().delete_user_memory(user, memory_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="memory not found for this user")
+    return {"deleted": True}
+
+
+def _serialize_memory_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "content": row["content"],
+        "metadata": row["metadata"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+VALID_TIERS = {"cheap", "standard", "strong"}
+
+
+class UpdateTierRequest(BaseModel):
+    user: str
+    tier: str
+
+
+@app.get("/v1/admin/model-tiers", dependencies=[Depends(_check_auth)])
+def get_model_tiers(user: str) -> dict:
+    """The real thing admin-ui's Model Tiering page was a mock in front of (see
+    PROGRESS.md item 29/36/38) — `config` is THIS user's own live Postgres-backed
+    role->tier map (gateway/roles/orchestrator.py's DEFAULT_ROLE_TIERS with their
+    role_tier_config overrides applied — every user picks their own tiering, same
+    `user` scoping as /v1/memory), `models` is the real registry, not a
+    hand-copied list a UI has to keep in sync by hand."""
+    return {
+        "config": resolve_role_tiers(get_db(), user),
+        "models": [
+            {
+                "name": entry.name,
+                "provider": entry.provider,
+                "tier": entry.tier,
+                "usable": entry.model_id != PLACEHOLDER_MODEL_ID,
+            }
+            for entry in _registry.values()
+        ],
+    }
+
+
+@app.patch("/v1/admin/model-tiers/{role}", dependencies=[Depends(_check_auth)])
+def update_model_tier(role: str, body: UpdateTierRequest) -> dict:
+    """Takes effect on THIS user's very next request — gateway/roles/
+    orchestrator.py's build_agent() reads role_tier_config fresh every time,
+    scoped to that request's user_id, no cache, no redeploy."""
+    if role not in DEFAULT_ROLE_TIERS:
+        raise HTTPException(status_code=404, detail=f"unknown role: {role}")
+    if body.tier not in VALID_TIERS:
+        raise HTTPException(status_code=400, detail=f"invalid tier: {body.tier!r}, must be one of {VALID_TIERS}")
+    get_db().set_role_tier(body.user, role, body.tier)
+    return {"user": body.user, "role": role, "tier": body.tier}
 
 
 def _short_circuit_title_response(model_name: str) -> JSONResponse:
