@@ -1421,6 +1421,409 @@ Strands) is undiagnosed, only worked around by the model's own retry behavior.
 filter params remain as unconfirmed as the other event endpoints were before item
 19 — only called with defaults so far, never with an explicit filter tested.
 
+## Item 28: Per-role model tiering — infrastructure wired, deliberately a no-op today
+
+The business doc (section 8) suggests routine coordination should run on modest
+reasoning capacity, with more capable models reserved for difficult conflicts.
+Asked the user whether to actually activate a stronger model for
+`independent_risk_and_evidence_officer` (the natural first candidate — it's the
+role whose job is literally to catch what another role got wrong, and the Chief
+already calls it selectively rather than on every question, so a pricier model
+there doesn't multiply into every request). User chose to keep everything on Haiku
+for now and just build the mechanism, given limited Anthropic credit.
+
+What changed:
+- `gateway/registry.py`: `select_for_tier(registry, tier, default)` — searches the
+  registry for a usable (`supports_tools`, non-placeholder `model_id`) entry of the
+  requested tier; falls back to `default` when none exists. `PLACEHOLDER_MODEL_ID =
+  "TODO"` made a public constant (was already the convention `models.yaml` used for
+  the unfinished `idx-analyst-gpt` entry; now named and reused rather than
+  re-typed).
+- `gateway/roles/orchestrator.py`: `ROLE_TIERS` dict mapping each of the 5 roles to
+  a tier — all `"cheap"` today, with the IRO entry commented as the intended first
+  bump to `"strong"`. `build_agent` gained an optional `registry:
+  dict[str, ModelEntry] | None = None` param; when given, each role's model_entry
+  is resolved via `model_for(role) -> select_for_tier(registry, ROLE_TIERS[role],
+  model_entry)` instead of every role sharing the single request-level
+  `model_entry` unconditionally. `registry=None` (the default, used by
+  `evals/agent_evals.py` and `scripts/generate_eval_conversations.py`, neither of
+  which needed changing) preserves the exact old behavior.
+- `gateway/main.py`: `_build_agent_with_fallback` now passes `registry=_registry`,
+  so the mechanism is actually live in the running gateway — currently a no-op
+  since `models.yaml` has no real `strong` model_id yet, verified directly
+  (`select_for_tier` resolves `"strong"` back to `idx-analyst-claude` since the new
+  `idx-analyst-claude-strong` row's `model_id` is still `TODO`).
+- `models.yaml`: added the `idx-analyst-claude-strong` row (tier `strong`, provider
+  anthropic, `model_id: TODO`) as a documented, inert placeholder — activating
+  tiering later is then a two-line change (a real `model_id` here, `"cheap"` ->
+  `"strong"` on one `ROLE_TIERS` entry), not new code.
+- `gateway/main.py`'s `/v1/models` listing now excludes any registry entry with a
+  placeholder `model_id` (both `idx-analyst-gpt` and the new
+  `idx-analyst-claude-strong`) — found while adding the second placeholder that the
+  existing `/v1/models` endpoint already exposed the first one as directly
+  selectable, which would have errored (`AnthropicModel` given `model_id="TODO"`)
+  had anyone picked it from LibreChat's model list. Fixed for both, not just the
+  new one.
+
+Verified: `load_registry()` loads the new 3rd row without error; `select_for_tier`
+resolves `"cheap"` -> `idx-analyst-claude` and `"strong"` -> falls back to
+`idx-analyst-claude` (checked directly, not assumed); `/v1/models`' selectable list
+now contains only `idx-analyst-claude`. Full suite: 72/72 still pass (no test
+exercised this path directly — gateway/roles has no test file — so this was
+runtime-checked by hand, not just by the suite staying green).
+
+**Not done**: no role actually runs on a different model yet — that's exactly what
+the user asked to defer. Activating it later needs a real Sonnet `model_id` in
+`models.yaml` and a one-line `ROLE_TIERS` change, nothing further.
+
+## Item 29: `admin-ui/` — model-tiering panel, scaffolded against a mock backend
+
+User wants to build their own custom UI (separate from the LibreChat chat UI this
+project already sits behind) and asked, for item 28's model tiering specifically,
+to build the UI side first rather than a real admin API — so the API can be
+designed against a concrete UI instead of guessed at up front.
+
+Scaffolded a real Vite + React + TypeScript app at `admin-ui/` (`npm create
+vite@latest admin-ui -- --template react-ts`), not a throwaway mockup. One screen:
+a table of the 5 roles, a tier `<select>` per role, and a "Resolves to" column
+showing the real model that tier resolves to — mirroring
+`gateway/registry.py::select_for_tier`'s fallback logic client-side
+(`resolveModelForTier` in `admin-ui/src/api/modelTiers.ts`), so a role set to
+`standard` or `strong` today visibly shows "falls back to idx-analyst-claude"
+rather than silently implying a model change that wouldn't actually happen. A
+reference panel below lists all registered models grouped by tier, placeholders
+marked.
+
+Backed by an explicitly-labeled mock (`admin-ui/src/api/modelTiers.ts`), not a real
+endpoint — there is no admin API on the gateway yet. `getModelTiering()` /
+`updateRoleTier()` are written to the shape the real endpoints are expected to take
+(`GET`/`PATCH /admin/model-tiers`) so swapping in real `fetch` calls later touches
+only that one file, not the components; state persists to `localStorage` only, so
+it survives a page refresh for demo purposes but is per-browser and never reaches
+the gateway. `ROLES`/`MODELS` in that file mirror `gateway/roles/orchestrator.py`'s
+`ROLE_TIERS` keys and `models.yaml`'s entries by hand — noted in both the module
+header and `admin-ui/README.md` as something to keep in sync, or better, replace
+with a real endpoint that serves the registry directly.
+
+Verified: `npm run build` (tsc typecheck + vite production build) succeeds clean;
+`npm run lint` (oxlint) reports nothing; `npm run dev` starts with no errors in its
+log and serves the expected HTML shell. **Not verified**: actual rendered behavior
+in a real browser — no browser-automation tool was available in this session to
+load the page and interact with it, so "select a tier, see the resolved-model
+badge update, refresh and see it persist" was reasoned through from the code, not
+watched happen. Worth an actual look before trusting it further.
+
+## Item 30: Docker-bundled `admin-ui`, real Chat + Memory screens, 3 real deployment
+bugs found running the full stack for the first time (2026-09-24)
+
+User's ask, in two parts: (1) bundle `admin-ui` into `docker-compose.yml` so it
+ships with the rest of the stack, and (2) it's not admin-only — the user will be
+showcasing session and memory to others, so it needs real Chat and Memory screens,
+not just Model Tiering. Asked two scoping questions first: chat stayed mock (user's
+choice, same reasoning as item 29 — nail the UI shape before spending on a real
+integration); memory got a real endpoint (user's choice), since there was no way
+to show actual remembered facts otherwise.
+
+**Real backend added** — `gateway/main.py`: `GET /v1/memory?user=`, `POST
+/v1/memory`, `DELETE /v1/memory/{id}?user=`, all behind the same bearer-auth
+dependency as `/v1/chat/completions`. Backed by two `data/db.py` changes:
+`search_user_memory` now selects `id` (needed so the UI can address a specific
+row to delete it — wasn't previously selected since the Strands `search_memory`
+tool path never needed it); `add_user_memory` now returns the inserted row via
+`RETURNING` instead of nothing. `delete_user_memory` is new, scoped to `(id,
+user_id)` together so one user id can't delete another's memory by guessing ids.
+Verified directly against the real local Postgres (add → list → delete → delete-
+again-returns-404) before touching the gateway at all, then again through the
+gateway's own HTTP endpoints with curl (200s, and a real 401 with no auth header).
+
+**Frontend restructured** — `admin-ui/src/App.tsx` is now a shell with tab
+navigation (Chat / Memory / Model Tiering) and a shared `userId` (a plain
+localStorage-backed value — there's no real login in this build, matching how
+`/v1/chat/completions` already takes a bare `user` field with no auth behind it).
+`ModelTiering.tsx` moved under `src/pages/` unchanged in behavior. Two new pages:
+`Memory.tsx` (real — list/add/delete against the new endpoints, shows each fact's
+auto-classified `kind` tag and timestamp) and `Chat.tsx` (mock — multiple named
+sessions with independent persisted history, switching between them, a canned
+assistant reply; explicitly trying to reproduce the *user-visible effect* of
+`gateway/roles/orchestrator.py`'s real session manager — history surviving a
+reload, scoped per session id — using localStorage, not the real mechanism; the
+in-UI copy says so). `src/api/client.ts` is a thin same-origin fetch wrapper
+(`/api/...`) shared by the one real API module (`memory.ts`) — nothing else
+changed shape.
+
+**Docker bundling** — `admin-ui/Dockerfile` (multi-stage: Node build → nginx
+serve), `admin-ui/nginx.conf.template`, and a new `admin-ui` service in
+`docker-compose.yml` (port 5173). nginx serves the static build AND reverse-
+proxies `/api/` to `agent-gateway:8000`, injecting `Authorization: Bearer
+${IDX_GATEWAY_KEY}` server-side via the official nginx image's envsubst-on-
+templates mechanism — the browser never sees the gateway key and there's no CORS
+to configure, since everything is same-origin from the browser's perspective.
+`vite.config.ts` gained a matching dev-mode proxy (same `/api` prefix, same
+header injection from `admin-ui/.env`'s `IDX_GATEWAY_KEY`) so behavior is
+identical in `npm run dev` and in the container.
+
+**This was actually run end-to-end via `docker compose build && up`, not just
+written** — and that surfaced three real, previously-undiscovered deployment bugs,
+none introduced this session, all now fixed:
+
+1. `gateway/Dockerfile` never `COPY`'d `analysis/` — the gateway container
+   crash-looped on import (`ModuleNotFoundError: No module named 'analysis'`)
+   the very first time anyone actually built and ran it via Compose. Fixed:
+   `COPY analysis analysis` added.
+2. `docker-compose.yml` never overrode `POSTGRES_HOST`/`VALKEY_HOST` for
+   `agent-gateway` or `ingest-worker` — both default to `localhost` in `.env`
+   (correct for this project's actual dev workflow so far, running the gateway
+   directly on the host), which inside either container means the container
+   itself, not the `postgres`/`valkey` containers. Every DB-backed request
+   failed (`psycopg.OperationalError: ... Connection refused`) until fixed by
+   overriding both to the in-network service names, same pattern already used
+   for `PHOENIX_COLLECTOR_ENDPOINT`.
+3. nginx's static `proxy_pass http://agent-gateway:8000/` resolves that hostname
+   once at container start and caches it — rebuilding/recreating just the
+   `agent-gateway` container (a new internal IP, same name) left the proxy
+   pointing at a dead address (`502`, "Host is unreachable") until `admin-ui`
+   itself was restarted. Fixed with Docker's embedded DNS resolver
+   (`resolver 127.0.0.11 valid=10s`) plus a variable in `proxy_pass`, which
+   forces re-resolution per request instead of once. That fix has its own two
+   nginx footguns, both hit and fixed in turn: a variable in `proxy_pass` drops
+   nginx's automatic "strip the location prefix" behavior for a trailing-slash
+   `proxy_pass` (needed an explicit `rewrite ^/api/(.*)$ /$1 break;`), and
+   `rewrite ... break` halts the rewrite-phase module for that request — so the
+   `set $gateway_upstream ...` line has to come *before* the `rewrite` line, not
+   after (the model's first attempt had it after and got "using uninitialized
+   ... variable"). Deliberately verified the self-healing worked, not just
+   assumed: stopped and recreated the `agent-gateway` container without
+   touching `admin-ui`, confirmed a request through the proxy still succeeded.
+
+Verified for real, in this order: `data/db.py` changes directly against local
+Postgres; the 3 new HTTP endpoints directly against a locally-run gateway
+(`uvicorn`) with curl, including a real 401; the admin-ui dev proxy
+(`npm run dev`) forwarding to that same local gateway with no manual auth header;
+`tsc -b` + `vite build` + `oxlint` clean; the full Docker path (browser port 5173
+→ nginx → agent-gateway container → Postgres container) for add/list/delete: all
+real, not mocked, and all actually executed against running containers, not
+reasoned about from the code. Full Python suite: 72/72 still pass after the
+`data/db.py` signature changes (no existing test asserted the old return shape).
+
+**Not done**: no actual browser click-through — still no browser-automation tool
+in this session, so the UI's *rendering* (as opposed to its underlying API calls,
+which were verified for real) is unverified. The Chat screen is still mock by the
+user's own choice. `db.init_schema()` still isn't wired into the Compose startup
+path (see the existing open item below) — this session's Postgres already had the
+schema from prior manual runs, so a truly fresh `docker compose up -d postgres`
+would still need that run by hand first.
+
+## Item 31: Real admin login (single-admin session auth) + Model Tiering redesign
+(2026-09-24)
+
+Two explicit asks: "production level auth" for admin-ui, and "better UI for
+config" (Model Tiering specifically). Scoped both with the user first — auth
+came back as single admin login (not multi-user accounts: this panel has one
+operator, a real accounts system is bigger and not needed yet), config came back
+as a real design/UX pass on the existing Model Tiering page, not new screens.
+
+**The actual gap this closes**: before this, admin-ui had *no login at all*.
+nginx injected the shared gateway bearer key into every `/api/` request
+regardless of who was looking at the page — anyone who loaded the URL already
+had full read/write access to `/v1/memory`. That's the thing "production level
+auth" needed to fix, not just adding a password field on top.
+
+**Backend** (`gateway/main.py`): three new endpoints, none behind the existing
+`_check_auth` bearer dependency (that authenticates *callers* — admin-ui's own
+nginx, LibreChat — not a person, and stays unchanged for `/v1/chat/completions`
+and `/v1/models`):
+- `POST /v1/auth/login` — `ADMIN_PASSWORD` (plaintext in `.env`, same trust tier
+  as `IDX_GATEWAY_KEY`/`ANTHROPIC_API_KEY` already sitting there — not hashed at
+  rest, since there's no separate password store to leak in the first place, just
+  an env-var compare; `hmac.compare_digest` for timing-safety) checked against
+  the submitted password, rate-limited via the *existing*
+  `gateway/guardrails.py::enforce_rate_limit` (reused, not reimplemented) at 5/min
+  keyed on `"admin-login"`. On success: a random `secrets.token_urlsafe(32)`
+  token stored in Valkey (`data/cache.py`'s `Cache` — reused as-is, no new
+  storage layer) with a 7-day TTL, set as an httpOnly, SameSite=Strict cookie.
+  Not `Secure=True` — nothing in this repo terminates TLS yet, noted in the code
+  as the thing to flip once it does.
+- `POST /v1/auth/logout` — deletes the Valkey token, clears the cookie.
+- `GET /v1/auth/verify` — no dependency, because this endpoint *is* the check:
+  401 unless the cookie names a live Valkey token. Used two ways: by nginx's
+  `auth_request` (below) on every proxied request, and directly by the frontend
+  on load to ask "am I already logged in."
+
+**Infra** (`admin-ui/nginx.conf.template`): added `auth_request /auth/verify`
+(nginx's native reverse-proxy auth module, confirmed compiled into the
+`nginx:1.27-alpine` image via `nginx -V`) in front of the `/api/` location —
+every request now needs a valid session cookie before nginx proxies it anywhere,
+enforced at the infra layer, not just hidden behind a client-side route guard
+(which alone would do nothing — the API would still be reachable directly).
+`/api/v1/auth/login` and `/api/v1/auth/logout` are separate exact-match
+locations that bypass the gate (login obviously has to work while logged out).
+
+**Frontend**: `src/pages/Login.tsx` (password form, real error states —
+wrong-password vs. rate-limited-429, both distinguished), `src/api/auth.ts`
+(login/logout/checkSession against the real endpoints), `App.tsx` now checks
+session on load and renders Login instead of the shell until authenticated, plus
+a sign-out button in the nav. Also inlined the ponytail-audit's own finding from
+earlier this session (`useUserId` had exactly one call site) directly into
+`App.tsx` while touching that file anyway, and deleted the dead default
+Vite/React template assets the same audit flagged
+(`src/assets/{react.svg,vite.svg,hero.png}`, `public/icons.svg`) — nothing
+referenced them.
+
+**Model Tiering redesign**: table+`<select>` replaced with a card grid (one
+`role-card` per role), a three-way segmented tier control instead of a dropdown,
+a colored dot + resolved-model name instead of a plain badge (green = real
+model for that tier, amber = falling back to cheap), and a new tier legend strip
+explaining what cheap/standard/strong actually mean in this system — none of
+that existed before, so a first-time viewer had no way to know what picking
+"strong" would actually cost or buy them.
+
+Verified for real, in order: `POST /v1/auth/login` with a wrong password (401)
+and the right one (200 + cookie) directly against the Dockerized gateway; 6
+rapid wrong-password attempts through the SAME rate limiter code path
+`/v1/chat/completions` already uses, confirming it actually blocks (429) even a
+correct password once tripped, and un-blocks once the minute window rolls over
+(waited for it, not assumed); the full browser-shaped path through nginx —
+unauthenticated `/api/v1/memory` (401), login, authenticated
+`/api/v1/memory` (200), logout, `/api/v1/memory` again (401) — all through
+`localhost:5173`, not the gateway directly; `tsc -b` + `vite build` + `oxlint`
+clean after every change. Full Python suite: 72/72 still pass.
+
+**Not done**: still no browser-automation tool this session, so the login
+screen's and redesigned cards' actual rendering is unverified — every check
+above exercised the real HTTP/cookie behavior, not what it looks like. Password
+is compared, not hashed, at rest (a deliberate call for a single-admin panel, not
+an oversight — see above); revisit if this ever becomes multi-admin. No "remember
+me" vs. session-only distinction — every login gets the same 7-day cookie.
+
+## Item 32: Phoenix trace data had no volume — was already gone, not just newly
+at risk (2026-09-24)
+
+User caught this by inspection, not from anything flagged in this log: asked
+whether Arize Phoenix's data survives a container restart. It didn't —
+`docker-compose.yml`'s `phoenix` service had no `volumes:` entry at all, unlike
+`postgres`/`valkey` which both had one from the start. Confirmed live: Phoenix
+defaults to SQLite at `~/.phoenix/phoenix.db` with no `PHOENIX_WORKING_DIR`/
+`PHOENIX_SQL_DATABASE_URL` set, which resolved to `/root/.phoenix/phoenix.db` —
+on the container's own writable layer, gone on any recreate.
+
+**Fixed**: added `phoenix_data:/root/.phoenix` to the service and to the
+top-level `volumes:` block — same pattern as the other two, no env var needed
+since it's the path Phoenix already defaults to.
+
+**The harder finding, checked before claiming anything was preserved**: rather
+than just add the volume and move on, backed up the running container's
+`/root/.phoenix` first (`docker cp`) so the fix wouldn't itself cause the very
+loss it was meant to prevent. That backup turned out to already be empty —
+`SELECT COUNT(*) FROM traces` / `FROM spans` both `0`, and the `idx-agent-gateway`
+project referenced throughout items 11-27 above wasn't there at all, only an
+empty `default` project. So the real data loss had already happened earlier in
+*this same session*, almost certainly when an earlier `docker compose up`
+recreated the phoenix container as a side effect of rebuilding other services
+(items 29-31's repeated `agent-gateway`/`admin-ui` rebuilds) — silently, since
+nothing at the time indicated phoenix itself had been touched. **Every trace and
+eval annotation this session logged to Phoenix (items 11 through 27) is gone.**
+The volume fix stops it from happening again; it does not recover what's
+already lost. Said this plainly rather than letting "I added a volume and
+copied the data over" imply a recovery that didn't actually happen.
+
+Verified: the new named volume (`sector_agents_phoenix_data`, matching compose's
+project-prefixed naming — confirmed via `docker compose config`) mounts at the
+exact path Phoenix reads from; the recreated container starts clean, serves
+`http://localhost:6006` (200), and both its REST (`/v1/projects`) and GraphQL
+APIs correctly show the (empty, real) `default` project — not silently broken,
+just empty. Full Python suite unaffected: 72/72 still pass (this was a
+Compose-only change).
+
+**Superseded by item 33 below** — the volume fix here was correct but not the
+best available fix; kept this entry for the history of how the gap was found.
+
+## Item 33: Phoenix moved onto the existing Postgres, not just given its own
+volume (2026-09-24)
+
+User's question after item 32: "why not the log data being fed to the
+postgres?" — right call. A second SQLite file with its own volume is a second
+thing to ever worry about backing up; Postgres in this stack already is backed
+up (has its own volume, is the durable store for everything else). Checked
+whether Phoenix actually supports Postgres natively rather than assuming:
+`docker exec sector_agents-phoenix-1 python3.13 -c "import phoenix.config as c; ..."`
+confirmed `PHOENIX_SQL_DATABASE_URL` is a real, documented config option and
+`asyncpg` is already installed in the image — no new dependency, no custom code,
+just pointing an existing feature at existing infrastructure.
+
+**Changed**:
+- `postgres-init/01-create-phoenix-db.sql` — `CREATE DATABASE phoenix;`, mounted
+  read-only at `/docker-entrypoint-initdb.d/` on the `postgres` service. Only
+  runs on a genuinely fresh volume (the official Postgres image's own
+  convention) — for THIS session's already-initialized volume, ran the same
+  statement by hand once: `docker exec sector_agents-postgres-1 psql -U
+  idx_agent -d idx_agent -c "CREATE DATABASE phoenix;"`. A separate database, not
+  a schema inside `idx_agent` — keeps Phoenix's ~65 tables (its own Alembic-
+  managed schema) fully out of this project's own tables.
+- `docker-compose.yml`'s `phoenix` service: added
+  `PHOENIX_SQL_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/phoenix`
+  (interpolated from the root `.env` — Compose reads that file for `${...}`
+  substitution in the YAML itself, separately from `env_file:` loading vars into
+  a container's own environment) and `depends_on: postgres`. Kept item 32's
+  `phoenix_data` volume mounted too, now just a home for non-relational working-
+  dir state (wasm cache, dataset exports) — not the source of truth anymore.
+
+Verified, in order, not assumed: confirmed `PHOENIX_SQL_DATABASE_URL` and
+`asyncpg` really exist in the image before writing any config; created the
+database; recreated the `phoenix` container and watched its own Alembic
+migration log run for real against Postgres, ending "✅ Migrations completed";
+confirmed 65 real tables landed in the `phoenix` database via `psql`; sent one
+real OTLP span through `http://localhost:6006/v1/traces` with a Python
+OpenTelemetry exporter and confirmed the row landed in Postgres
+(`SELECT COUNT(*) FROM spans` → 1); then — the actual test that matters —
+`docker compose stop phoenix && rm -f phoenix && up -d phoenix` (a full
+container removal, not just a restart) and confirmed that span was still
+there afterward, and the UI came back up clean. Deleted the test span
+afterward so it doesn't sit in Phoenix as a fake trace. Full Python suite:
+72/72 still pass (Compose/SQL-only change, no Python code touched).
+
+**Not done**: item 32's data loss (items 11-27's traces and eval annotations)
+is still gone — this fix prevents it from happening again, it doesn't recover
+anything. `postgres-init/` only helps a genuinely fresh `docker compose up` from
+here on; anyone restoring this repo onto a pre-existing Postgres volume from
+before this change still needs the one-time `CREATE DATABASE phoenix;` by hand.
+
+## Item 34: Chat mock wasn't actually scoped per user — found answering "how do I
+prove the session for different user" (2026-09-24)
+
+User asked how to demonstrate that switching the "User" field actually isolates
+data between users. Checked before answering: Memory really is (server-side,
+`WHERE user_id = %s` — verified live again just now: added a fact as `alice`,
+confirmed `bob` sees an empty list, confirmed `alice` still sees it). Chat's mock
+was not — `src/api/chat.ts` kept every session in one shared `localStorage` key
+with no `userId` field at all, so switching users did nothing for that tab; every
+session showed up for everyone.
+
+Fixed: `ChatSession` gained a `userId` field (stamped by `createSession`),
+`listSessions(userId)` now filters by it, `Chat.tsx` passes `userId` through and
+re-fetches when it changes. `sendMessage` stays unfiltered by user — a session id
+is already a UUID, a second per-user check on top would be redundant. Also had to
+restructure `Chat.tsx`'s load effect into a named async function instead of a
+bare `setLoading(true)` before the `.then()` — oxlint's `set-state-in-effect`
+rule flagged the original synchronous-looking call; `Memory.tsx` already used the
+named-async-function shape for the same reason, so this just matches it.
+
+Verified: `tsc -b` + `vite build` + `oxlint` clean; rebuilt and redeployed the
+`admin-ui` container; re-ran the exact alice/bob Memory isolation check through
+the live Docker stack (add as alice → empty for bob → still there for alice) to
+confirm the whole login+proxy+scoping chain still works after the rebuild. Chat's
+own per-user isolation wasn't re-checked with a browser (still no
+browser-automation tool), but the code path is now structurally identical to
+Memory's (filter by the same `userId` prop), which *was* checked live.
+
+Also noticed while debugging a separate "wrong password" report just before
+this: `ADMIN_PASSWORD` in `.env` only takes effect on `agent-gateway` at
+container *creation* — editing `.env` while a container is already running does
+nothing until it's recreated (`docker compose up -d agent-gateway`), since
+`env_file` values are baked in once, not re-read live. Not a bug, just worth
+documenting since it produced a confusing "I set it but it's still wrong"
+report — the actual value in use can always be checked directly:
+`docker exec sector_agents-agent-gateway-1 printenv ADMIN_PASSWORD`.
+
 ## Not started / open
 
 1. ~~`db.init_schema()` is never called anywhere~~ — done for real: 11 tables exist in

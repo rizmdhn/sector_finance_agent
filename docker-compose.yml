@@ -1,7 +1,7 @@
-# No chat UI is wired up yet — the agent-gateway's OpenAI-compatible API can be hit
-# directly (curl, Postman, scripts/manage.py) in the meantime. Leaning towards Open
-# WebUI over LibreChat (see librechat.yaml, kept around in case that changes); add its
-# service here once decided.
+# LibreChat/Open WebUI (librechat.yaml, kept around) is still the option for a
+# full-featured chat client. admin-ui/ below is this project's own purpose-built
+# panel instead — model tiering, session-style chat (mock so far), and a real
+# memory browser (gateway/main.py's /v1/memory) — see admin-ui/README.md.
 
 services:
   agent-gateway:
@@ -12,20 +12,46 @@ services:
       - "8000:8000"
     env_file: .env
     environment:
-      # Override any PHOENIX_COLLECTOR_ENDPOINT in .env (that default targets
-      # localhost, for running the gateway outside Compose) with the in-network
-      # service name — see gateway/telemetry.py.
+      # .env's POSTGRES_HOST/VALKEY_HOST/PHOENIX_COLLECTOR_ENDPOINT all default to
+      # localhost, for running the gateway outside Compose (e.g. this project's own
+      # dev workflow so far — see PROGRESS.md). Inside this container "localhost"
+      # is the container itself, not the postgres/valkey/phoenix containers, so
+      # all three need overriding to the in-network service names or the gateway
+      # can't reach any of its real backends — found live running this for the
+      # first time via `docker compose up` (item 29): the gateway container
+      # started but every DB-backed request failed with "connection to server at
+      # 127.0.0.1 ... Connection refused".
+      - POSTGRES_HOST=postgres
+      - VALKEY_HOST=valkey
       - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
     depends_on:
       - valkey
       - postgres
       - phoenix
 
+  admin-ui:
+    build:
+      context: ./admin-ui
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    # Only IDX_GATEWAY_KEY is actually used (nginx.conf.template injects it into
+    # the proxied Authorization header) — env_file here for convenience/parity
+    # with the other services, not because admin-ui needs the rest of .env.
+    env_file: .env
+    depends_on:
+      - agent-gateway
+
   ingest-worker:
     build:
       context: .
       dockerfile: ingest/Dockerfile
     env_file: .env
+    environment:
+      # Same fix as agent-gateway above, same reason: .env's hosts default to
+      # localhost for running outside Compose.
+      - POSTGRES_HOST=postgres
+      - VALKEY_HOST=valkey
     depends_on:
       - valkey
       - postgres
@@ -45,12 +71,39 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs once, only on a brand-new/empty volume (the official image's
+      # docker-entrypoint-initdb.d convention) — creates the separate `phoenix`
+      # database the phoenix service below points at. See that file's own header
+      # comment for why a fresh volume needs this but this session's existing one
+      # didn't (had to be created by hand instead — PROGRESS.md item 33).
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
 
   phoenix:
     image: arizephoenix/phoenix:latest
     ports:
       - "6006:6006"
+    env_file: .env
+    environment:
+      # Real fix, not just "add a volume": Phoenix has native Postgres support
+      # (PHOENIX_SQL_DATABASE_URL — confirmed live via phoenix.config, asyncpg is
+      # already in the image) and this project already runs a durable, backed-up
+      # Postgres for everything else — pointing Phoenix at it (its own `phoenix`
+      # database, not mixed into `idx_agent`'s tables/schema) means one durable
+      # store instead of two, and Phoenix's own Alembic migrations manage its
+      # schema there automatically on startup. A mounted volume for Phoenix's
+      # default SQLite file (kept below, `phoenix_data`) was the first fix tried
+      # here and would have worked, but this reuses infrastructure that already
+      # exists instead of adding a second thing to keep backed up.
+      - PHOENIX_SQL_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/phoenix
+    depends_on:
+      - postgres
+    volumes:
+      # Not the source of truth anymore (Postgres is, above) — kept as a home for
+      # whatever non-relational state Phoenix's working dir still uses (wasm
+      # cache, dataset exports). Harmless to keep, no reason to remove it.
+      - phoenix_data:/root/.phoenix
 
 volumes:
   valkey_data:
   postgres_data:
+  phoenix_data:

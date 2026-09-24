@@ -7,7 +7,14 @@
 #   key_ref        env var name holding the API key
 #   context_limit  used to trim history for this model
 #   supports_tools whether the model can be trusted with tool calling
-#   tier           cheap | standard | strong
+#   tier           cheap | standard | strong — gateway/registry.py's select_for_tier
+#                  uses this to resolve gateway/roles/orchestrator.py's per-role
+#                  ROLE_TIERS map. A tier with no real (non-TODO) model_id below is
+#                  silently skipped and every role asking for it falls back to
+#                  whatever model the request itself picked — see ROLE_TIERS'
+#                  docstring. Only `cheap` is real today (2026-09-24); `standard`
+#                  and `strong` are both placeholders until there's credit to spend
+#                  lighting one up.
 #   fallback       name of the registry entry to retry on provider errors
 
 models:
@@ -31,3 +38,18 @@ models:
     supports_tools: true
     tier: standard
     fallback: null
+
+  # Not yet activated — model_id is a placeholder on purpose (select_for_tier skips
+  # it) until the user decides to spend credit on it. Intended for
+  # independent_risk_and_evidence_officer (see ROLE_TIERS in
+  # gateway/roles/orchestrator.py): to turn it on, set model_id to a real Sonnet
+  # model id, name a real fallback below, and bump that one ROLE_TIERS entry from
+  # "cheap" to "strong" — nothing else needs to change.
+  - name: idx-analyst-claude-strong
+    provider: anthropic
+    model_id: TODO
+    key_ref: ANTHROPIC_API_KEY
+    context_limit: 200000
+    supports_tools: true
+    tier: strong
+    fallback: idx-analyst-claude
