@@ -193,29 +193,52 @@ changes (a new trading day's close, or a new filing).
 
 ## Agent architecture
 
-`gateway/agent.py::build_agent` now builds the **Chief Portfolio Intelligence
-Orchestrator** (`gateway/roles/orchestrator.py`), the first piece of the 5-role
-architecture in `portfolio-intelligence-business-requirements-v1.1.md` section 4 —
-replacing the earlier flat single-agent MVP. Only 2 of the 5 roles exist so far:
+`gateway/roles/orchestrator.py::build_agent` builds the **Chief Portfolio
+Intelligence Orchestrator** with all 5 roles from
+`portfolio-intelligence-business-requirements-v1.1.md` section 4 wired up — the
+earlier flat single-agent MVP is fully replaced. Each specialist is attached as an
+agent-as-tool (Strands' `Agent.as_tool()`), and every specialist's own module
+docstring states exactly which of its business-doc responsibilities are backed by
+a real tool here and which are not — the system prompts say so explicitly rather
+than fabricating coverage, per this project's running rule
+(`portfolio-intelligence-data-gap-analysis-v1.md`):
 
-- **Chief Portfolio Intelligence Orchestrator** — no tools of its own; delegates to
-  specialists and synthesizes their answers.
-- **Investment Research Lead** (`gateway/roles/investment_research.py`) — wired to
-  the Chief as an agent-as-tool (Strands' `Agent.as_tool()`), with
-  `get_company_report`, `get_price_history`, `analyze_fundamentals`, and
-  `screen_companies`. Covers company economics, financial quality, and valuation;
-  ownership/governance and thesis monitoring are named in its system prompt as not
-  backed by real tools yet, so it says so rather than fabricating an answer.
+- **Chief Portfolio Intelligence Orchestrator** — no tools of its own; decides
+  which specialist(s) a question needs, checks memory when relevant, and
+  synthesizes findings into one answer, preserving each specialist's hedges rather
+  than tightening them into settled fact.
+- **Investment Research Lead** (`gateway/roles/investment_research.py`) —
+  `get_company_report`, `get_price_history`, `analyze_fundamentals`,
+  `screen_companies`. Company economics, financial quality, and valuation for one
+  company at a time. Ownership/governance and thesis monitoring against a
+  previously recorded thesis are not backed by real tools yet.
+- **Portfolio Risk Lead** (`gateway/roles/portfolio_risk.py`) — `analyze_portfolio`,
+  `analyze_liquidity`, `analyze_returns` (`gateway/tools/portfolio_analysis.py`,
+  reads only already-ingested Postgres data — zero Sectors API credit no matter how
+  often it's called). Exposure/concentration and single-position exit liquidity;
+  no covariance, stress-testing, or benchmark comparison, and no access to the
+  user's actual mandate limits (those live in the Chief's memory, which this role
+  doesn't have — the Chief pairs a recalled limit against this role's numbers
+  itself).
+- **Market and Event Intelligence Lead** (`gateway/roles/market_intelligence.py`) —
+  price/volume moves, foreign flow, broker activity, filings, corporate actions,
+  news. No statistical baseline for "unusual" (descriptive comparisons, not a
+  significance test), and the Sectors API's `symbol`/`date` filters on
+  filings/news/foreign-flow are unconfirmed to actually filter.
+- **Independent Risk and Evidence Officer**
+  (`gateway/roles/independent_risk_officer.py`) — reviews a draft answer's
+  evidence/calculations (same data tools as the other three, so it can reproduce a
+  calculation, not just re-read a summary) and returns PASS / PASS WITH
+  LIMITATIONS / REVISE / DATA BLOCKED / HUMAN ESCALATION. The most expensive step
+  per question (its own tool calls + its own model call on top of whatever already
+  ran), so the Chief's system prompt calls it selectively — before a material
+  quantitative claim the user may act on financially — not on every question. Its
+  decision cannot be softened or silently dropped once called.
 
-**Not implemented yet: Portfolio Risk Lead, Market and Event Intelligence Lead,
-Independent Risk and Evidence Officer.** The Chief's system prompt explicitly tells
-it to say so whenever a question would need one of them, rather than presenting an
-answer as portfolio-risk-checked or independently reviewed when neither has
-happened. One concrete consequence: `analyze_portfolio`/`analyze_liquidity`/
-`analyze_returns` (Portfolio Risk Lead's territory per the doc's role table) are
-**not** attached to the Chief — they're still exposed as CLI commands and as
-importable tools in `gateway/tools/portfolio_analysis.py`, ready for a Portfolio Risk
-Lead agent to pick up, but nothing in the live agent graph calls them right now.
+Two things enforced only in the Chief's system prompt, not structurally: it cannot
+claim "reviewed"/"approved" without the Independent Risk and Evidence Officer
+actually having returned that decision, and a REVISE/DATA BLOCKED verdict must
+change the presented answer, not be absorbed and ignored.
 
 **Model tiering is implemented and per-user.** `models.yaml` now has three real,
 usable Anthropic entries — `idx-analyst-claude` (Haiku 4.5, `cheap`),
