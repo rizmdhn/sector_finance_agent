@@ -364,7 +364,8 @@ class Database:
                 return conn.execute(
                     """
                     SELECT id, content, metadata, created_at FROM user_memory
-                    WHERE user_id = %s AND to_tsvector('english', content) @@ to_tsquery('english', %s)
+                    WHERE user_id = %s AND status = 'active'
+                      AND to_tsvector('english', content) @@ to_tsquery('english', %s)
                     ORDER BY ts_rank(to_tsvector('english', content), to_tsquery('english', %s)) DESC
                     LIMIT %s
                     """,
@@ -373,11 +374,52 @@ class Database:
             return conn.execute(
                 """
                 SELECT id, content, metadata, created_at FROM user_memory
-                WHERE user_id = %s
+                WHERE user_id = %s AND status = 'active'
                 ORDER BY created_at DESC LIMIT %s
                 """,
                 (user_id, limit),
             ).fetchall()
+
+    def invalidate_user_memory(self, user_id: str, memory_id: int) -> None:
+        """Consolidation's UPDATE action: retire a fact a newer one supersedes,
+        without deleting it (keeps the audit trail — data/schema.sql's comment)."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE user_memory SET status = 'invalid' WHERE id = %s AND user_id = %s",
+                (memory_id, user_id),
+            )
+
+    def get_summary_for_session(self, user_id: str, session_id: str) -> dict | None:
+        """The one active `kind: summary` row tagged with this session_id, if any —
+        data/memory_store.py::write_summary upserts against this instead of
+        consolidating summaries the way write_memory consolidates facts."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT id, content, metadata, created_at FROM user_memory
+                WHERE user_id = %s AND status = 'active' AND metadata->>'kind' = 'summary'
+                  AND metadata->>'session_id' = %s
+                """,
+                (user_id, session_id),
+            ).fetchone()
+
+    def get_memory_settings(self, user_id: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT auto_extraction FROM user_memory_settings WHERE user_id = %s", (user_id,)
+            ).fetchone()
+            return {"auto_extraction": bool(row["auto_extraction"]) if row else False}
+
+    def set_memory_settings(self, user_id: str, auto_extraction: bool) -> dict:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_memory_settings (user_id, auto_extraction) VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET auto_extraction = EXCLUDED.auto_extraction, updated_at = now()
+                """,
+                (user_id, auto_extraction),
+            )
+            return {"auto_extraction": auto_extraction}
 
     def delete_user_memory(self, user_id: str, memory_id: int) -> bool:
         """Scoped to `user_id` as well as `id` so one user can never delete

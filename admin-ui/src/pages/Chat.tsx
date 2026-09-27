@@ -28,6 +28,7 @@ export default function Chat({ userId }: { userId: string }) {
   const [loading, setLoading] = useState(true);
   const [sendError, setSendError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -76,11 +77,13 @@ export default function Chat({ userId }: { userId: string }) {
       )
     );
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     setSending(true);
     setCurrentStep(null);
     setStreamingText("");
     try {
-      const updated = await sendMessage(activeId, text, setCurrentStep, setStreamingText);
+      const updated = await sendMessage(activeId, text, setCurrentStep, setStreamingText, controller.signal);
       setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
     } catch (err) {
       // The user's message is already saved (sendMessage pushes it before the
@@ -93,10 +96,18 @@ export default function Chat({ userId }: { userId: string }) {
         setSendError("Could not reach the gateway.");
       }
     } finally {
+      abortRef.current = null;
       setSending(false);
       setCurrentStep(null);
       setStreamingText("");
     }
+  }
+
+  function handleStop() {
+    // sendMessage() catches the resulting AbortError itself and resolves
+    // normally with whatever text had already streamed in — this just
+    // triggers that, it doesn't need its own try/catch.
+    abortRef.current?.abort();
   }
 
   return (
@@ -153,7 +164,7 @@ export default function Chat({ userId }: { userId: string }) {
                   </div>
                 ))}
                 {sending && streamingText && (
-                  <div className="chat-bubble chat-bubble--assistant">
+                  <div className="chat-bubble chat-bubble--assistant chat-bubble--streaming">
                     <div className="chat-bubble-role">assistant</div>
                     <Markdown text={streamingText} />
                   </div>
@@ -164,9 +175,9 @@ export default function Chat({ userId }: { userId: string }) {
                       <span className="chat-step-label">{stepLabel(currentStep)}</span>
                     ) : (
                       <>
-                        <span />
-                        <span />
-                        <span />
+                        <span className="typing-dot" />
+                        <span className="typing-dot" />
+                        <span className="typing-dot" />
                       </>
                     )}
                   </div>
@@ -185,9 +196,15 @@ export default function Chat({ userId }: { userId: string }) {
                   onChange={(event) => setDraft(event.target.value)}
                   disabled={sending}
                 />
-                <button type="submit" disabled={sending || !draft.trim()}>
-                  Send
-                </button>
+                {sending ? (
+                  <button type="button" className="chat-stop-btn" onClick={handleStop}>
+                    Stop
+                  </button>
+                ) : (
+                  <button type="submit" disabled={!draft.trim()}>
+                    Send
+                  </button>
+                )}
               </form>
             </>
           )}

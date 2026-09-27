@@ -117,3 +117,37 @@ def test_add_caller_metadata_overrides_auto_classified_kind(db: Database, user_i
 
     results = _run(store.search("BBCA"))
     assert any(r.metadata.get("kind") == "custom" for r in results)
+
+
+# -- AgentCore-parity additions: settings, consolidation -------------------
+# No real Anthropic calls in these — auto_extraction stays False (its default)
+# unless a test explicitly turns it on and only checks primitives that don't
+# themselves call an LLM (decide_consolidation is data/tests/test_memory_llm.py's
+# job, offline).
+
+
+def test_memory_settings_default_off_and_roundtrip(db: Database, user_id: str):
+    assert db.get_memory_settings(user_id) == {"auto_extraction": False}
+    assert db.set_memory_settings(user_id, True) == {"auto_extraction": True}
+    assert db.get_memory_settings(user_id) == {"auto_extraction": True}
+
+
+def test_invalidated_memory_excluded_from_search(db: Database, user_id: str):
+    row = db.add_user_memory(user_id, "User holds 1000 shares of BBCA", {"kind": "portfolio"})
+    assert any(r["id"] == row["id"] for r in db.search_user_memory(user_id, "BBCA", 10))
+
+    db.invalidate_user_memory(user_id, row["id"])
+    assert not any(r["id"] == row["id"] for r in db.search_user_memory(user_id, "BBCA", 10))
+
+
+def test_write_summary_upserts_per_session(db: Database, user_id: str):
+    from data.memory_store import write_summary
+
+    first = write_summary(db, user_id, "session-a", "First summary of the conversation.")
+    second = write_summary(db, user_id, "session-a", "Updated summary after more turns.")
+
+    assert first["id"] == second["id"]  # same session -> same row, not a new one
+    assert second["content"] == "Updated summary after more turns."
+
+    other_session = write_summary(db, user_id, "session-b", "A different session's summary.")
+    assert other_session["id"] != second["id"]

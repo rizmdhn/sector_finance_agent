@@ -133,6 +133,27 @@ CREATE TABLE IF NOT EXISTS user_memory (
 );
 CREATE INDEX IF NOT EXISTS user_memory_user_id_idx ON user_memory (user_id, created_at DESC);
 
+-- AgentCore-style memory consolidation (data/memory_store.py::write_memory,
+-- data/memory_llm.py). `status` lets consolidation retire a fact a newer one
+-- supersedes (UPDATE) without deleting the audit trail outright. Runs
+-- entirely on Anthropic (no embeddings/pgvector — this project only holds an
+-- Anthropic key, and Anthropic has no embeddings API; a candidate fact to
+-- compare a new one against comes from the same full-text search `search()`
+-- already uses, judged by a cheap Anthropic call instead of cosine distance).
+ALTER TABLE user_memory ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+-- Per-user opt-in for automatic memory extraction (gateway/memory_extraction.py's
+-- background pass after each conversation) and the LLM-based consolidation
+-- write_memory does when it's on. Off by default: both are a real, additional
+-- Anthropic API call beyond the conversation itself, and this project's
+-- running rule is that memory should only cost something when something
+-- actually asks it to.
+CREATE TABLE IF NOT EXISTS user_memory_settings (
+    user_id         TEXT PRIMARY KEY,
+    auto_extraction BOOLEAN NOT NULL DEFAULT false,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Per-user, per-role model tier overrides (gateway/roles/orchestrator.py's
 -- DEFAULT_ROLE_TIERS/resolve_role_tiers, gateway/registry.py's select_for_tier).
 -- Keyed by (user_id, role_id) — each user picks their own tiering, same user_id

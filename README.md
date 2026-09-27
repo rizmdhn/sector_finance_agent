@@ -276,14 +276,28 @@ bugs found and fixed along the way):
   runs with `--maxmemory-policy allkeys-lru`, correct for a cache but wrong for
   memory that must actually persist. Deliberately free-form text (not a fixed
   schema): a fact is whatever the user or the Chief decided was worth remembering
-  — a portfolio position, a mandate limit, a preference. Searched via Postgres
-  full-text search (OR-of-words, ranked by `ts_rank`), not embeddings — zero
-  additional API cost, matching this project's credit-consciousness. No automatic
-  background extraction or context injection either, for the same reason: memory
-  only costs something when the Chief (or the user) actually asks for it. Full
-  CRUD from the gateway (`GET`/`POST`/`PATCH`/`DELETE /v1/memory`) and from
-  admin-ui's Memory screen — every operation scoped to the requesting user, so
-  one user can't read or edit another's facts.
+  — a portfolio position, a mandate limit, a preference. Full CRUD from the
+  gateway (`GET`/`POST`/`PATCH`/`DELETE /v1/memory`) and from admin-ui's Memory
+  screen — every operation scoped to the requesting user, so one user can't read
+  or edit another's facts.
+
+  **AgentCore-style memory strategies (items 41-42), opt-in per user** via
+  `PATCH /v1/memory/settings` (admin-ui's Memory screen has a toggle) — off by
+  default, matching this project's credit-consciousness: with it off, memory
+  costs nothing unless the Chief (or the user) actually asks for it, exactly as
+  before. Turned on, two things change: (1) a background pass
+  (`gateway/memory_extraction.py`, a Starlette `BackgroundTask` — runs only
+  after the reply is already sent, adds no latency) automatically pulls facts,
+  preferences, and a running per-session summary out of every conversation,
+  with no explicit `add_memory` call needed; (2) every write goes through
+  LLM-judged consolidation (`data/memory_store.py::write_memory`) — candidate
+  facts come from the same Postgres full-text search `search_memory` already
+  uses, and a cheap Anthropic call (`data/memory_llm.py`) decides ADD/UPDATE/
+  SKIP against them, marking a superseded fact `invalid` rather than deleting
+  it. Runs entirely on Anthropic, deliberately (item 42): an embedding-based
+  version (OpenAI + pgvector) was built first and reverted the same day, since
+  this project only holds an Anthropic key and Anthropic has no embeddings
+  API.
 
 ```
 python scripts/manage.py init-db   # picks up the new user_memory table

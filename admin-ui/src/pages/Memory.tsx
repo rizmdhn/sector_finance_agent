@@ -1,10 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError } from "../api/client";
-import { addMemory, deleteMemory, listMemory, updateMemory } from "../api/memory";
+import { addMemory, deleteMemory, getMemorySettings, listMemory, updateMemory, updateMemorySettings } from "../api/memory";
 import type { MemoryEntry } from "../types";
 
+const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString();
+  return dateFormatter.format(new Date(iso));
 }
 
 export default function Memory({ userId }: { userId: string }) {
@@ -17,12 +19,16 @@ export default function Memory({ userId }: { userId: string }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+  const [autoExtraction, setAutoExtraction] = useState(false);
+  const [savingSetting, setSavingSetting] = useState(false);
 
   async function refresh() {
     setLoading(true);
     setError(null);
     try {
-      setEntries(await listMemory(userId));
+      const [loadedEntries, settings] = await Promise.all([listMemory(userId), getMemorySettings(userId)]);
+      setEntries(loadedEntries);
+      setAutoExtraction(settings.auto_extraction);
     } catch (err) {
       setError(err instanceof ApiError ? `Gateway error (${err.status}): ${err.message}` : "Could not reach the gateway.");
     } finally {
@@ -34,6 +40,20 @@ export default function Memory({ userId }: { userId: string }) {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
+  async function handleToggleAutoExtraction() {
+    const next = !autoExtraction;
+    setAutoExtraction(next);
+    setSavingSetting(true);
+    try {
+      await updateMemorySettings(userId, next);
+    } catch {
+      setAutoExtraction(!next);
+      setError("Could not update the setting.");
+    } finally {
+      setSavingSetting(false);
+    }
+  }
 
   async function handleAdd(event: FormEvent) {
     event.preventDefault();
@@ -89,7 +109,10 @@ export default function Memory({ userId }: { userId: string }) {
   return (
     <div className="page">
       <header className="page-header">
-        <h1>Memory</h1>
+        <div className="page-header-row">
+          <h1>Memory</h1>
+          {!loading && !error && <span className="memory-count">{entries.length} saved</span>}
+        </div>
         <p className="subtitle">
           Long-term facts saved about <strong>{userId}</strong> — real data from Postgres
           (<code>user_memory</code>), the same store the Chief's <code>search_memory</code>/
@@ -97,6 +120,24 @@ export default function Memory({ userId }: { userId: string }) {
           here and it's visible to the agent on its next chat immediately.
         </p>
       </header>
+
+      <label className="auto-extraction-toggle">
+        <input
+          type="checkbox"
+          checked={autoExtraction}
+          onChange={handleToggleAutoExtraction}
+          disabled={savingSetting || loading}
+        />
+        <span>
+          <strong>Automatic memory extraction</strong>
+          <span className="auto-extraction-note">
+            {" "}
+            — after each conversation, a cheap model call decides what's worth remembering (facts, preferences, a
+            summary) and saves it on its own, checking similar existing facts first to avoid saving the same thing
+            twice. Real, additional API cost per conversation beyond the reply itself — off by default.
+          </span>
+        </span>
+      </label>
 
       <form className="memory-form" onSubmit={handleAdd}>
         <input
@@ -156,7 +197,7 @@ export default function Memory({ userId }: { userId: string }) {
                         {Boolean(entry.metadata?.kind) && (
                           <span className="kind-chip">{String(entry.metadata?.kind)}</span>
                         )}
-                        <span className="memory-date">{formatDate(entry.created_at)}</span>
+                        <span className="memory-date">Added {formatDate(entry.created_at)}</span>
                       </div>
                     </div>
                     <div className="memory-item-actions">

@@ -12,8 +12,9 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
-from gateway import compat
+from gateway import compat, memory_extraction
 from gateway.agent import build_agent
 from gateway.guardrails import (
     RateLimitExceededError,
@@ -24,6 +25,7 @@ from gateway.registry import PLACEHOLDER_MODEL_ID, load_registry
 from gateway.roles.orchestrator import DEFAULT_ROLE_TIERS, resolve_role_tiers
 from gateway.telemetry import setup_telemetry, traced_conversation
 from data.deps import get_cache, get_db
+from data.memory_store import write_memory
 from data.session_repository import ValkeySessionRepository
 
 SESSION_HEADER = "X-Session-Id"
@@ -170,9 +172,16 @@ async def chat_completions(request: Request):
         agent.system_prompt = f"{agent.system_prompt}\n\n{system_prompt}"
 
     if stream:
+        # `result` is filled by _stream_response as the generator runs, but the
+        # BackgroundTask below is only *constructed* now, before any of that has
+        # happened — passing the dict itself (not its not-yet-known "answer" key)
+        # means the extraction call, which Starlette only runs once the whole
+        # streamed body has been sent to the client, sees the real answer.
+        result: dict = {}
         response = StreamingResponse(
-            _stream_response(agent, strands_messages, model_name, question, user_id),
+            _stream_response(agent, strands_messages, model_name, question, user_id, result),
             media_type="text/event-stream",
+            background=BackgroundTask(memory_extraction.maybe_extract, get_db(), user_id, session_id, question, result),
         )
         response.headers[SESSION_HEADER] = session_id
         return response
@@ -184,6 +193,9 @@ async def chat_completions(request: Request):
     return JSONResponse(
         compat.completion_response(compat.completion_id(), model_name, answer),
         headers={SESSION_HEADER: session_id},
+        background=BackgroundTask(
+            memory_extraction.maybe_extract, get_db(), user_id, session_id, question, {"answer": answer}
+        ),
     )
 
 
@@ -213,7 +225,9 @@ async def _run_to_completion(agent, messages: list[dict]) -> str:
     return "".join(chunks)
 
 
-async def _stream_response(agent, messages: list[dict], model_name: str, question: str, user_id: str):
+async def _stream_response(
+    agent, messages: list[dict], model_name: str, question: str, user_id: str, result: dict
+):
     """Confirmed live (2026-09-24) that Strands' stream_async() exposes which top-
     level tool the Chief is currently calling via event["current_tool_use"]["name"]
     — for this agent that's always one of the 4 specialists or search_memory/
@@ -243,6 +257,7 @@ async def _stream_response(agent, messages: list[dict], model_name: str, questio
                 chunks.append(event["data"])
                 yield compat.sse_chunk(completion_id_, model_name, {"content": event["data"]})
         span.set_output("".join(chunks))
+    result["answer"] = "".join(chunks)
     yield compat.sse_chunk(completion_id_, model_name, {}, finish_reason="stop")
     yield compat.sse_done()
 
@@ -279,9 +294,35 @@ def list_memory(user: str, limit: int = 100) -> dict:
 def add_memory(body: AddMemoryRequest) -> dict:
     """Add a memory fact directly, bypassing the model — lets a UI let the user
     record a fact themselves rather than only through add_memory's tool calls
-    mid-chat."""
-    row = get_db().add_user_memory(body.user, body.content, body.metadata)
+    mid-chat. Routed through data/memory_store.py's write_memory (not a plain
+    insert) so a manually-added fact gets the same embedding/consolidation
+    treatment as one the Chief or background extraction wrote, when this user
+    has auto_extraction on."""
+    row = write_memory(get_db(), body.user, body.content, body.metadata)
     return _serialize_memory_row(row)
+
+
+class UpdateMemorySettingsRequest(BaseModel):
+    user: str
+    auto_extraction: bool
+
+
+@app.get("/v1/memory/settings", dependencies=[Depends(_check_auth)])
+def get_memory_settings(user: str) -> dict:
+    """Whether this user has AgentCore-style automatic memory extraction turned
+    on (gateway/memory_extraction.py) — off by default, see data/schema.sql's
+    user_memory_settings table for why. Declared before the
+    /v1/memory/{memory_id} routes below: FastAPI matches routes in declaration
+    order, and a `PATCH /v1/memory/settings` declared after `PATCH
+    /v1/memory/{memory_id}` would have "settings" swallowed as memory_id
+    instead (found live: first attempt at this endpoint 422'd, "settings" failing
+    int-parsing as a memory_id)."""
+    return {"user": user, **get_db().get_memory_settings(user)}
+
+
+@app.patch("/v1/memory/settings", dependencies=[Depends(_check_auth)])
+def update_memory_settings(body: UpdateMemorySettingsRequest) -> dict:
+    return {"user": body.user, **get_db().set_memory_settings(body.user, body.auto_extraction)}
 
 
 @app.patch("/v1/memory/{memory_id}", dependencies=[Depends(_check_auth)])

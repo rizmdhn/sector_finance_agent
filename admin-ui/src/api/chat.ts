@@ -72,7 +72,8 @@ export async function sendMessage(
   sessionId: string,
   content: string,
   onStep?: (step: string) => void,
-  onDelta?: (text: string) => void
+  onDelta?: (text: string) => void,
+  signal?: AbortSignal
 ): Promise<ChatSession> {
   const sessions = loadSessions();
   const session = sessions.find((s) => s.id === sessionId);
@@ -102,6 +103,7 @@ export async function sendMessage(
       user: session.userId,
       messages: session.messages.map((m) => ({ role: m.role, content: m.content })),
     }),
+    signal,
   });
   if (!response.ok || !response.body) {
     const body = await response.text().catch(() => "");
@@ -112,32 +114,51 @@ export async function sendMessage(
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
+  let stopped = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? "";
-    for (const event of events) {
-      const line = event.trim();
-      if (!line.startsWith("data: ")) continue;
-      const raw = line.slice("data: ".length);
-      if (raw === "[DONE]") continue;
-      const chunk = JSON.parse(raw) as CompletionChunk;
-      const delta = chunk.choices[0]?.delta ?? {};
-      if (delta.step) onStep?.(delta.step);
-      if (delta.content) {
-        text += delta.content;
-        onDelta?.(text);
+  // Aborting `signal` (Chat.tsx's Stop button) rejects reader.read() below with
+  // an AbortError — caught here rather than left to propagate, so whatever
+  // text already streamed in still gets saved as a real (partial) reply
+  // instead of being thrown away. The abort also closes this fetch's
+  // underlying connection, which the gateway's ASGI server (uvicorn) sees as a
+  // client disconnect and cancels its own streaming generator — Strands' model
+  // call gets cancelled along with it, not just the browser giving up on
+  // listening, so stopping here also stops the in-flight model call actually
+  // generating (and billing for) more output. Confirmed live: see PROGRESS.md.
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const event of events) {
+        const line = event.trim();
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice("data: ".length);
+        if (raw === "[DONE]") continue;
+        const chunk = JSON.parse(raw) as CompletionChunk;
+        const delta = chunk.choices[0]?.delta ?? {};
+        if (delta.step) onStep?.(delta.step);
+        if (delta.content) {
+          text += delta.content;
+          onDelta?.(text);
+        }
       }
     }
+  } catch (err) {
+    if (!(err instanceof DOMException && err.name === "AbortError")) throw err;
+    stopped = true;
   }
 
   const assistantMessage: ChatMessage = {
     id: crypto.randomUUID(),
     role: "assistant",
-    content: text || "(empty response)",
+    content: stopped
+      ? text
+        ? `${text}\n\n_(stopped)_`
+        : "_(stopped before a reply arrived)_"
+      : text || "(empty response)",
     createdAt: new Date().toISOString(),
   };
   session.messages.push(assistantMessage);

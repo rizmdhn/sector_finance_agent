@@ -36,6 +36,10 @@ export interface MemoryEntry {
   created_at: string;
 }
 
+export interface MemorySettings {
+  auto_extraction: boolean;
+}
+
 // -- Chat (mock only — see src/api/chat.ts's header comment) ------------------
 
 export interface ChatMessage {
