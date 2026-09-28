@@ -2,7 +2,7 @@
 # ~15 questions run across every model in models.yaml to catch tool-calling failures.
 
 providers:
-  - id: openai:chat:idx-analyst-claude
+  - id: openai:chat:idx-analyst-gpt
     config:
       apiBaseUrl: http://localhost:8000/v1
   - id: openai:chat:idx-analyst-gpt

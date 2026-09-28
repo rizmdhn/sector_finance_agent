@@ -2,7 +2,11 @@
 #
 # Fields:
 #   name           public model name shown in LibreChat
-#   provider       strands model provider (anthropic, openai, ...)
+#   provider       strands model provider — anthropic | openai (Chat Completions,
+#                  /v1/chat/completions) | openai_responses (OpenAI's newer
+#                  Responses API, /v1/responses — required for a reasoning model
+#                  that can't do tool calling on Chat Completions at all, see
+#                  idx-analyst-gpt-strong's own comment, item 45)
 #   model_id       provider-specific model id
 #   key_ref        env var name holding the API key
 #   context_limit  used to trim history for this model
@@ -12,15 +16,22 @@
 #                  ROLE_TIERS map. A tier with no real (non-TODO) model_id below is
 #                  silently skipped and every role asking for it falls back to
 #                  whatever model the request itself picked — see ROLE_TIERS'
-#                  docstring. `cheap`/`standard`/`strong` are all real Anthropic
-#                  models as of 2026-09-24 (item 36) — whether any role actually
-#                  runs on `standard`/`strong` is still a separate, deliberate
-#                  choice in ROLE_TIERS (every role defaults to `cheap`).
+#                  docstring. Every tier now has both a real Anthropic and a real
+#                  OpenAI entry (item 45) — whether any role actually runs on
+#                  `standard`/`strong` is still a separate, deliberate choice in
+#                  ROLE_TIERS (every role defaults to `cheap`); a user can also
+#                  pick any of these by name directly, not just by tier
+#                  (admin-ui's Model Tiering page, item 44).
 #   fallback       name of the registry entry to retry on provider errors
-#   effort         optional, anthropic only: output_config.effort ("low".."max") —
-#                  thinking depth/spend WITHIN this model, distinct from tier
-#                  (which model). Omit for Haiku 4.5 — it errors if this field is
-#                  present at all, even unset/default.
+#   effort         optional: anthropic's output_config.effort ("low".."max", real
+#                  thinking-depth choice) | openai's reasoning_effort (MUST be
+#                  "none" for a reasoning model to allow tool calling on Chat
+#                  Completions — not a real thinking-depth choice there) |
+#                  openai_responses' reasoning.effort ("low".."xhigh", a real
+#                  thinking-depth choice, tool calling works at any level).
+#                  Requirements differ per model, confirmed live per entry, never
+#                  assumed to transfer from a sibling model. Omit for Haiku 4.5 —
+#                  it errors if this field is present at all, even unset/default.
 
 models:
   - name: idx-analyst-claude
@@ -37,15 +48,25 @@ models:
 
   - name: idx-analyst-gpt
     provider: openai
-    model_id: TODO
+    model_id: gpt-5.6-luna
     key_ref: OPENAI_API_KEY
     context_limit: 0
     supports_tools: true
-    tier: standard
+    tier: cheap
     fallback: null
-    # Still a placeholder (unrelated to the two real Anthropic tiers below) —
-    # select_for_tier skips it automatically (model_id stays TODO), so it never
-    # competes with idx-analyst-claude-sonnet for the "standard" tier.
+    effort: none
+    # Real model, real key (item 44) — `model_id` confirmed against a live
+    # `client.models.list()` call, not guessed. Deliberately `tier: cheap`, same
+    # as idx-analyst-claude: `select_for_tier` (gateway/registry.py) now treats
+    # "the request's own model already matches this role's tier" as "use it
+    # as-is" rather than always substituting whichever same-tier entry comes
+    # first in this file — before that fix, selecting this model at the top
+    # level silently ran every role on Claude anyway, real bug found live.
+    # `effort: none` is REQUIRED here, not optional like the Anthropic entries'
+    # `effort` — gpt-5.6-luna is a reasoning model and rejects tool calling on
+    # /v1/chat/completions entirely unless reasoning_effort is explicitly
+    # "none" (confirmed via a live 400 error, not guessed — see
+    # gateway/registry.py's OpenAI branch).
 
   - name: idx-analyst-claude-sonnet
     provider: anthropic
@@ -56,6 +77,43 @@ models:
     tier: standard
     fallback: idx-analyst-claude
     # No effort override — Sonnet 5's own default (equivalent to "high") applies.
+
+  - name: idx-analyst-gpt-standard
+    provider: openai
+    model_id: gpt-5.6-sol
+    key_ref: OPENAI_API_KEY
+    context_limit: 0
+    supports_tools: true
+    tier: standard
+    fallback: idx-analyst-gpt
+    effort: none
+    # Same reasoning-model tool-calling requirement as idx-analyst-gpt
+    # (effort: none is mandatory, not a real thinking-depth choice, for
+    # /v1/chat/completions) — confirmed live for this specific model_id before
+    # adding it, not assumed to work the same as gpt-5.6-luna just because the
+    # error message looked identical. Picked over the other 5.6-family
+    # siblings (luna already used for cheap, terra untested) at the user's
+    # explicit choice (item 45).
+
+  - name: idx-analyst-gpt-strong
+    provider: openai_responses
+    model_id: gpt-6-astra
+    key_ref: OPENAI_API_KEY
+    context_limit: 0
+    supports_tools: true
+    tier: strong
+    fallback: idx-analyst-gpt-standard
+    effort: low
+    # NOT `provider: openai` — gpt-6-astra cannot do tool calling on
+    # /v1/chat/completions at all (real dead end found live: it requires
+    # reasoning_effort "none" for tools, but rejects "none" as a value for
+    # itself). Needs OpenAI's Responses API instead (gateway/registry.py's
+    # `openai_responses` branch, Strands' OpenAIResponsesModel) — confirmed
+    # live with a raw `client.responses.create(..., reasoning={"effort":
+    # "low"})` call before wiring this in. `effort: low` here is a real
+    # thinking-depth choice for the Responses API (unlike the `openai`
+    # provider's forced "none"), picked as the cheapest reasoning level that
+    # actually works with tools, at the user's explicit choice (item 45).
 
   # Recommended over "Sonnet 5 at max effort" for this tier (see PROGRESS.md item
   # 36): effort only deepens thinking WITHIN a model, Opus is a genuinely more

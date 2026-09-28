@@ -19,7 +19,10 @@ export interface RoleInfo {
   description: string;
 }
 
-export type RoleTierConfig = Record<string, Tier>;
+// A role's stored choice is either a Tier keyword or a real ModelInfo.name
+// picked directly (gateway/roles/orchestrator.py::model_for checks the
+// registry before falling back to tier resolution) — not just Tier anymore.
+export type RoleTierConfig = Record<string, string>;
 
 export interface ModelTieringState {
   roles: RoleInfo[];

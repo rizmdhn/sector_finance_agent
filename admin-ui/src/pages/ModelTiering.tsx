@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getModelTiering, resolveModelForTier, updateRoleTier } from "../api/modelTiers";
+import { getModelTiering, resolveChoice, updateRoleTier } from "../api/modelTiers";
 import type { ModelInfo, RoleInfo, RoleTierConfig, Tier } from "../types";
 
 const TIERS: Tier[] = ["cheap", "standard", "strong"];
@@ -12,9 +12,10 @@ const TIER_BLURB: Record<Tier, string> = {
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
-function ResolvedModel({ tier, models }: { tier: Tier; models: ModelInfo[] }) {
-  const requested = models.find((m) => m.tier === tier);
-  const resolved = resolveModelForTier(tier, models);
+function ResolvedModel({ choice, models }: { choice: string; models: ModelInfo[] }) {
+  const isDirectPick = models.some((m) => m.name === choice);
+  const requested = isDirectPick ? models.find((m) => m.name === choice) : models.find((m) => m.tier === choice);
+  const resolved = resolveChoice(choice, models);
 
   if (requested?.usable) {
     return (
@@ -27,7 +28,7 @@ function ResolvedModel({ tier, models }: { tier: Tier; models: ModelInfo[] }) {
   return (
     <div
       className="resolved resolved--fallback"
-      title={`${tier} has no real model registered yet — falls back to cheap`}
+      title={`${choice} has no usable model — falls back to cheap`}
     >
       <span className="resolved-dot" />
       <span>
@@ -39,17 +40,18 @@ function ResolvedModel({ tier, models }: { tier: Tier; models: ModelInfo[] }) {
 
 function RoleCard({
   role,
-  tier,
+  choice,
   models,
   onChange,
   saveState,
 }: {
   role: RoleInfo;
-  tier: Tier;
+  choice: string;
   models: ModelInfo[];
-  onChange: (roleId: string, tier: Tier) => void;
+  onChange: (roleId: string, choice: string) => void;
   saveState: SaveState;
 }) {
+  const usableModels = models.filter((m) => m.usable);
   return (
     <article className="role-card">
       <div className="role-card-head">
@@ -62,22 +64,29 @@ function RoleCard({
         {saveState === "error" && <span className="save-state save-state--error">failed, retry</span>}
       </div>
 
-      <div className="tier-segmented" role="radiogroup" aria-label={`Tier for ${role.label}`}>
-        {TIERS.map((t) => (
-          <button
-            key={t}
-            type="button"
-            role="radio"
-            aria-checked={tier === t}
-            className={`tier-segment ${tier === t ? "tier-segment--active" : ""}`}
-            onClick={() => onChange(role.id, t)}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      <select
+        className="tier-select"
+        aria-label={`Model or tier for ${role.label}`}
+        value={choice}
+        onChange={(event) => onChange(role.id, event.target.value)}
+      >
+        <optgroup label="Tier (auto-picks a model)">
+          {TIERS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Specific model">
+          {usableModels.map((m) => (
+            <option key={m.name} value={m.name}>
+              {m.name} ({m.provider})
+            </option>
+          ))}
+        </optgroup>
+      </select>
 
-      <ResolvedModel tier={tier} models={models} />
+      <ResolvedModel choice={choice} models={models} />
     </article>
   );
 }
@@ -118,11 +127,11 @@ export default function ModelTiering({ userId }: { userId: string }) {
     return grouped;
   }, [models]);
 
-  async function handleTierChange(roleId: string, tier: Tier) {
-    setConfig((prev) => ({ ...prev, [roleId]: tier }));
+  async function handleTierChange(roleId: string, choice: string) {
+    setConfig((prev) => ({ ...prev, [roleId]: choice }));
     setSaveStateByRole((prev) => ({ ...prev, [roleId]: "saving" }));
     try {
-      await updateRoleTier(userId, roleId, tier);
+      await updateRoleTier(userId, roleId, choice);
       setSaveStateByRole((prev) => ({ ...prev, [roleId]: "saved" }));
       setTimeout(() => {
         setSaveStateByRole((prev) => (prev[roleId] === "saved" ? { ...prev, [roleId]: "idle" } : prev));
@@ -137,8 +146,8 @@ export default function ModelTiering({ userId }: { userId: string }) {
       <header className="page-header">
         <h1>Model Tiering</h1>
         <p className="subtitle">
-          Assign each agent role a cost tier for <strong>{userId}</strong>. Each user has their own tiering — a tier
-          with no usable model yet falls back to the cheap model.
+          Assign each agent role a cost tier — or a specific model — for <strong>{userId}</strong>. Each user has
+          their own config; a tier or model with nothing usable registered falls back to the cheap model.
         </p>
       </header>
 
@@ -161,7 +170,7 @@ export default function ModelTiering({ userId }: { userId: string }) {
               <RoleCard
                 key={role.id}
                 role={role}
-                tier={config[role.id] ?? "cheap"}
+                choice={config[role.id] ?? "cheap"}
                 models={models}
                 onChange={handleTierChange}
                 saveState={saveStateByRole[role.id] ?? "idle"}

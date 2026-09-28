@@ -359,6 +359,11 @@ VALID_TIERS = {"cheap", "standard", "strong"}
 
 class UpdateTierRequest(BaseModel):
     user: str
+    # Either one of VALID_TIERS (resolved to a model via
+    # gateway/registry.py::select_for_tier, same as always) or a real
+    # models.yaml entry `name` picked directly (gateway/roles/orchestrator.py's
+    # model_for() checks the registry before falling back to tier resolution) —
+    # admin-ui's Model Tiering page offers both in one dropdown now.
     tier: str
 
 
@@ -391,8 +396,11 @@ def update_model_tier(role: str, body: UpdateTierRequest) -> dict:
     scoped to that request's user_id, no cache, no redeploy."""
     if role not in DEFAULT_ROLE_TIERS:
         raise HTTPException(status_code=404, detail=f"unknown role: {role}")
-    if body.tier not in VALID_TIERS:
-        raise HTTPException(status_code=400, detail=f"invalid tier: {body.tier!r}, must be one of {VALID_TIERS}")
+    if body.tier not in VALID_TIERS and body.tier not in _registry:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid tier/model: {body.tier!r}, must be one of {VALID_TIERS} or a real model name",
+        )
     get_db().set_role_tier(body.user, role, body.tier)
     return {"user": body.user, "role": role, "tier": body.tier}
 

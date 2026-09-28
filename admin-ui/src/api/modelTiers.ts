@@ -13,7 +13,7 @@
 // the real registry every time, so it can't drift out of sync with models.yaml.
 
 import { apiFetch } from "./client";
-import type { ModelInfo, ModelTieringState, RoleInfo, RoleTierConfig, Tier } from "../types";
+import type { ModelInfo, ModelTieringState, RoleInfo, RoleTierConfig } from "../types";
 
 export const ROLES: RoleInfo[] = [
   {
@@ -43,12 +43,16 @@ export const ROLES: RoleInfo[] = [
   },
 ];
 
-/** Mirrors gateway/registry.py's select_for_tier: pick a usable model of the
- * requested tier, falling back to the cheap/default model when the tier has no
- * real (non-placeholder) model registered. */
-export function resolveModelForTier(tier: Tier, models: ModelInfo[]): ModelInfo {
-  const match = models.find((model) => model.tier === tier && model.usable);
-  if (match) return match;
+/** Mirrors gateway/roles/orchestrator.py's model_for(): a role's stored
+ * `choice` is checked against real model names FIRST (a direct pick, e.g.
+ * "idx-analyst-gpt" regardless of its tier), then falls back to tier
+ * resolution (gateway/registry.py's select_for_tier — a usable model of that
+ * tier, or the cheap/default model if none exists for it). */
+export function resolveChoice(choice: string, models: ModelInfo[]): ModelInfo {
+  const direct = models.find((model) => model.name === choice && model.usable);
+  if (direct) return direct;
+  const tierMatch = models.find((model) => model.tier === choice && model.usable);
+  if (tierMatch) return tierMatch;
   return models.find((model) => model.tier === "cheap")!;
 }
 
@@ -59,9 +63,9 @@ export async function getModelTiering(userId: string): Promise<ModelTieringState
   return { roles: ROLES, models: result.models, config: result.config };
 }
 
-export async function updateRoleTier(userId: string, roleId: string, tier: Tier): Promise<void> {
-  await apiFetch<{ user: string; role: string; tier: Tier }>(`/v1/admin/model-tiers/${roleId}`, {
+export async function updateRoleTier(userId: string, roleId: string, choice: string): Promise<void> {
+  await apiFetch<{ user: string; role: string; tier: string }>(`/v1/admin/model-tiers/${roleId}`, {
     method: "PATCH",
-    body: JSON.stringify({ user: userId, tier }),
+    body: JSON.stringify({ user: userId, tier: choice }),
   });
 }

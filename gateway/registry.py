@@ -61,7 +61,20 @@ def select_for_tier(registry: dict[str, ModelEntry], tier: str, default: ModelEn
     per-role model tiering entry). This keeps per-role tiering (gateway/roles/
     orchestrator.py's ROLE_TIERS) a no-op today: every role resolves back to
     `default` until a real model is registered for the tier it asks for.
+
+    `default.tier == tier` short-circuits straight to `default` before ever
+    scanning the registry — real bug found live (2026-09-28): with two entries
+    sharing a tier (`idx-analyst-claude` and `idx-analyst-gpt` both `cheap`),
+    every role defaulting to `cheap` silently resolved back to whichever entry
+    happens to be declared first in models.yaml, regardless of which model the
+    request actually asked for — picking `idx-analyst-gpt` at the top level had
+    no effect at all, every role still ran on Claude. The whole point of this
+    function is substituting a DIFFERENT tier's model in for a role that needs
+    more/less capability than what was requested; when the role's tier already
+    matches what was requested, there's nothing to substitute.
     """
+    if default.tier == tier:
+        return default
     for entry in registry.values():
         if entry.tier == tier and entry.supports_tools and entry.model_id != PLACEHOLDER_MODEL_ID:
             return entry
@@ -104,9 +117,44 @@ def build_model(entry: ModelEntry) -> Model:
     if entry.provider == "openai":
         from strands.models.openai import OpenAIModel
 
+        # Reuses the same `effort` YAML field as the Anthropic branch above, but
+        # maps to a different real API param — `reasoning_effort`, OpenAI's own
+        # name for it (confirmed via a live error, not guessed): a reasoning
+        # model (gpt-5.6-luna) rejects tool calling on /v1/chat/completions
+        # entirely unless `reasoning_effort` is explicitly "none" —
+        # `openai.BadRequestError: Function tools with reasoning_effort are not
+        # supported for gpt-5.6-luna in /v1/chat/completions.` Omitted when
+        # entry.effort is None so a non-reasoning OpenAI model (no `effort` set
+        # in models.yaml) doesn't get a param it never asked for.
+        params = {"reasoning_effort": entry.effort} if entry.effort else None
+
         return OpenAIModel(
             client_args={"api_key": api_key},
             model_id=entry.model_id,
+            params=params,
+        )
+
+    if entry.provider == "openai_responses":
+        from strands.models.openai_responses import OpenAIResponsesModel
+
+        # A separate provider, not just another `openai` entry with a different
+        # `effort` value: found live (item 45) that gpt-6-astra can't do tool
+        # calling on /v1/chat/completions AT ALL — it requires reasoning_effort
+        # "none" for tools, same as gpt-5.6-luna/sol, but then rejects "none" as
+        # a value for itself ("Supported values are: 'low', 'medium', 'high',
+        # and 'xhigh'"), a genuine dead end on that endpoint. OpenAI's newer
+        # Responses API (`client.responses.create`, Strands' separate
+        # OpenAIResponsesModel) accepts a real reasoning effort alongside tools
+        # — confirmed live with a raw `client.responses.create(...,
+        # reasoning={"effort": "low"})` call before wiring this in. The
+        # `reasoning` param shape (`{"effort": ...}`) is the Responses API's
+        # own, different from Chat Completions' flat `reasoning_effort`.
+        params = {"reasoning": {"effort": entry.effort}} if entry.effort else None
+
+        return OpenAIResponsesModel(
+            client_args={"api_key": api_key},
+            model_id=entry.model_id,
+            params=params,
         )
 
     raise ValueError(f"unsupported provider: {entry.provider}")

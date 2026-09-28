@@ -53,6 +53,8 @@ concurrent — those are plain function tools with no shared-instance lock, so
 Strands' concurrent default stays in place for every specialist's own Agent build.
 """
 
+from datetime import date
+
 from strands import Agent
 from strands.memory import MemoryManager
 from strands.session.repository_session_manager import RepositorySessionManager
@@ -116,6 +118,28 @@ def resolve_role_tiers(db: Database, user_id: str) -> dict[str, str]:
     defeating the point of making this live-editable."""
     return {**DEFAULT_ROLE_TIERS, **db.get_role_tiers(user_id)}
 
+def _today_context() -> str:
+    """Real wall-clock date, appended to every agent's system prompt (Chief and
+    all 4 specialists) at build time — not baked into the static SYSTEM_PROMPT
+    strings below, since those are module-level constants built once at import,
+    while the real date obviously changes per request. Fixes a real, previously
+    documented gap (gateway/roles/market_intelligence.py used to carry a "you do
+    NOT reliably know today's actual date" workaround): an LLM's only source for
+    "what is today" otherwise is its training cutoff, which is wrong by
+    definition for any request after that cutoff, and silently wrong rather than
+    erroring — the Chief's own "Date check" rule (this module's SYSTEM_PROMPT)
+    and the time-sensitive-data rule both depend on this actually being correct.
+    """
+    return (
+        f"\n\nToday's real date is {date.today().isoformat()}. Use this — not any "
+        'date you might otherwise assume from training — for every relative-time '
+        'judgment: what counts as "recent", whether a date is in the future, how '
+        'old a figure is, and what "today"/"current" actually means. If a tool '
+        "call returns a date, prefer that over your own date arithmetic if they'd "
+        "ever conflict."
+    )
+
+
 SYSTEM_PROMPT = """\
 You are the Chief Portfolio Intelligence Orchestrator for an IDX (Indonesia Stock \
 Exchange) portfolio intelligence system. You define what the user is actually \
@@ -133,6 +157,16 @@ that on a question with no finance content to research is a waste regardless of 
 capable the question seems to require it. A borderline case (e.g. "what's a P/E \
 ratio") can be answered directly from your own knowledge without a tool call too — \
 reserve specialists for questions that actually need this system's real data.
+
+Date check, also before anything else: you are given today's real date below — use \
+it, not any date you might otherwise assume. If a question asks about a future date \
+or event (an earnings release that hasn't happened yet, a price "next week" or \
+"next quarter", anything asking you to predict or forecast), do NOT call any \
+specialist or tool — this system has no forecasting capability and no tool here can \
+return data that doesn't exist yet; spending a tool call to discover that would \
+waste both credit and tokens. Say so directly instead. A question mixing a \
+past/present part with a future part still gets the past/present part answered \
+normally — only the future part gets flagged as unavailable, not the whole question.
 
 Available specialists:
 - investment_research_lead: company economics, financial quality, valuation, and \
@@ -206,6 +240,13 @@ news, flow, or insider-filing data alone.
 - Lead with the finding and its significance, then the evidence, the main \
 uncertainty, and a next useful step. A short question gets a short, proportionate \
 answer — do not pad a narrow question into a full research report.
+- Time-sensitive figures (price, market cap, dividend yield, valuation ratios, \
+trading volume) are never live/intraday — IDX close data is ingested after each \
+session, so "today's" figure is really the most recently completed trading \
+session, which may be today's real date or an earlier one (a weekend or holiday \
+pushes it back further). Always state the actual as-of date a tool returned rather \
+than assuming it equals today's real date, and never describe a figure as \
+real-time or "as of right now."
 - You are not a financial adviser. Do not give buy/sell/hold recommendations.
 """
 
@@ -244,13 +285,28 @@ def build_agent(
     def model_for(role: str) -> ModelEntry:
         if registry is None or role_tiers is None:
             return model_entry
-        return select_for_tier(registry, role_tiers[role], model_entry)
+        choice = role_tiers[role]
+        # A per-role choice is either one of the 3 tier keywords (resolved via
+        # select_for_tier, same as always) or a real registry entry name picked
+        # directly (admin-ui's Model Tiering page now offers both — "just use
+        # idx-analyst-gpt for this role" regardless of tier). Checking the
+        # registry first is unambiguous: no tier is ever also a valid model name.
+        if choice in registry:
+            return registry[choice]
+        return select_for_tier(registry, choice, model_entry)
 
     investment_research_lead = build_investment_research_lead(model_for("investment_research_lead"))
     portfolio_risk_lead = build_portfolio_risk_lead(model_for("portfolio_risk_lead"))
     market_intelligence_lead = build_market_intelligence_lead(model_for("market_and_event_intelligence_lead"))
     independent_risk_officer = build_independent_risk_officer(model_for("independent_risk_and_evidence_officer"))
     chief_model_entry = model_for("chief")
+
+    # Real date, appended to every one of these 4 specialists' own system prompts
+    # too, not just the Chief's below — market_and_event_intelligence_lead and
+    # investment_research_lead both reason about "recent"/dated figures directly.
+    today_context = _today_context()
+    for specialist in (investment_research_lead, portfolio_risk_lead, market_intelligence_lead, independent_risk_officer):
+        specialist.system_prompt += today_context
 
     session_manager = RepositorySessionManager(
         session_id=session_id, session_repository=ValkeySessionRepository(cache)
@@ -288,7 +344,7 @@ def build_agent(
                 description=independent_risk_officer.description,
             ),
         ],
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT + today_context,
         session_manager=session_manager,
         plugins=[memory_manager],
         tool_executor=SequentialToolExecutor(),

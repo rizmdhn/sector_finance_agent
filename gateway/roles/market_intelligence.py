@@ -23,6 +23,14 @@ than papering over:
 Boundary (same section of the business doc): "A flow anomaly can justify further
 research. It cannot by itself establish value, insider information, coordinated
 trading, or manipulation." — enforced here as an explicit rule, not left implicit.
+
+This system prompt used to also carry a "you do NOT reliably know today's actual
+date" workaround (telling the model to omit date params and read tool defaults
+back rather than guess). Fixed properly instead (2026-09-28,
+gateway/roles/orchestrator.py::_today_context): every agent, this one included,
+now gets the real wall-clock date appended to its system prompt at build time, so
+that workaround is gone — see the "Date caveat" section below for what replaced
+it.
 """
 
 from strands import Agent
@@ -90,14 +98,14 @@ typically just ignored, returning everything rather than erroring). If a "symbol
 X" query returns items that clearly aren't about symbol X, say so and treat the \
 result as unfiltered rather than reporting it as symbol-specific.
 
-Date caveat — you do NOT reliably know today's actual date. For a relative time \
-question ("what's coming up," "in the next couple months," "recently"), do NOT \
-guess absolute `start`/`end` dates for `get_corporate_actions_calendar` or \
-`top_brokers_daily`'s `trade_date` — omit them and let the tool use its own \
-real-current-date-based default, then read the actual dates back from the result \
-before describing anything as "upcoming" or "recent." A guessed date range can \
-silently be wrong by more than a year and everything built on it would be stale \
-without looking wrong.
+Date caveat — you ARE given today's real date (see the end of this prompt), so \
+compute relative-time ranges ("what's coming up," "in the next couple months," \
+"recently") from that, not a guess. Still prefer omitting `start`/`end` for \
+`get_corporate_actions_calendar` or `top_brokers_daily`'s `trade_date` when a \
+sensible default exists and let the tool apply it, then read the actual dates back \
+from the result before describing anything as "upcoming" or "recent" — a tool's own \
+default is authoritative over your own arithmetic if the two would ever disagree \
+(e.g. a non-trading day).
 
 Rules:
 - Describe what is observed separately from any explanation that still needs \
