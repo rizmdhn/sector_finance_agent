@@ -71,6 +71,12 @@ DEFAULT_PROJECT = "idx-agent-gateway"
 # check reliably from text alone; expand only as specific failures are observed
 # in real traces, per this project's "keep computation proportionate" principle
 # (business doc section 8).
+# `pass_label` is the one choice that counts as the answer meeting this rule —
+# used by gateway/eval_runner.py to turn raw label tallies into a pass rate
+# (admin-ui's Evals page shows this as "accuracy", the number a non-technical
+# user can actually read). "not_applicable" is never a pass_label: it's excluded
+# from the pass-rate denominator entirely rather than counted either way, same
+# as it already was in this module's own CLASSIFIERS choices.
 CLASSIFIERS = {
     "cites_evidence_date": {
         "prompt_template": (
@@ -82,6 +88,7 @@ CLASSIFIERS = {
             "numeric claim at all, respond not_applicable."
         ),
         "choices": ["dated", "undated", "not_applicable"],
+        "pass_label": "dated",
     },
     "no_investment_recommendation": {
         "prompt_template": (
@@ -92,6 +99,7 @@ CLASSIFIERS = {
             "findings and letting the user decide?"
         ),
         "choices": ["gives_recommendation", "describes_findings_only"],
+        "pass_label": "describes_findings_only",
     },
     "discloses_missing_data": {
         "prompt_template": (
@@ -106,6 +114,7 @@ CLASSIFIERS = {
             "not_applicable."
         ),
         "choices": ["discloses_clearly", "glosses_over", "not_applicable"],
+        "pass_label": "discloses_clearly",
     },
 }
 

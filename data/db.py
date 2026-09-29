@@ -464,3 +464,75 @@ class Database:
                 """,
                 (user_id, role_id, tier),
             )
+
+    # -- Eval runs (gateway/eval_runner.py) --------------------------------------
+
+    def create_eval_run(self, user_id: str, judge_provider: str, judge_model: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO eval_runs (user_id, judge_provider, judge_model) VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (user_id, judge_provider, judge_model),
+            ).fetchone()
+            return row["id"]
+
+    def start_eval_run(self, run_id: int, total: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE eval_runs SET status = 'running', total = %s, updated_at = now() WHERE id = %s",
+                (total, run_id),
+            )
+
+    def progress_eval_run(self, run_id: int, completed: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE eval_runs SET completed = %s, updated_at = now() WHERE id = %s", (completed, run_id)
+            )
+
+    def finish_eval_run(self, run_id: int, summary: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE eval_runs SET status = 'done', summary = %s, updated_at = now() WHERE id = %s",
+                (psycopg.types.json.Json(summary), run_id),
+            )
+
+    def fail_eval_run(self, run_id: int, error: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE eval_runs SET status = 'error', error = %s, updated_at = now() WHERE id = %s",
+                (error, run_id),
+            )
+
+    def cancel_eval_run(self, run_id: int) -> None:
+        """eval_runner.py calls this once it actually stops (after finishing
+        whichever conversation was in flight), so `status` only ever flips to
+        'cancelled' when the run has really exited, not just been asked to."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE eval_runs SET status = 'cancelled', updated_at = now() WHERE id = %s", (run_id,)
+            )
+
+    def request_eval_run_cancel(self, run_id: int) -> bool:
+        """Only takes effect on a still-in-flight run — a finished run has
+        nothing left to stop. Returns whether it applied."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE eval_runs SET cancel_requested = true WHERE id = %s AND status IN ('pending', 'running')",
+                (run_id,),
+            )
+            return cur.rowcount > 0
+
+    def is_eval_run_cancelled(self, run_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT cancel_requested FROM eval_runs WHERE id = %s", (run_id,)).fetchone()
+            return bool(row and row["cancel_requested"])
+
+    def get_eval_run(self, run_id: int) -> dict | None:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM eval_runs WHERE id = %s", (run_id,)).fetchone()
+
+    def list_eval_runs(self, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM eval_runs ORDER BY created_at DESC LIMIT %s", (limit,)).fetchall()

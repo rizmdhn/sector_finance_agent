@@ -9,9 +9,23 @@ API vs. assumed.
 import hashlib
 import json
 import re
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 CACHE_KEY_VERSION = "v1"
+
+IDX_TIMEZONE = ZoneInfo("Asia/Jakarta")
+
+
+def idx_today() -> date:
+    """"Today" for IDX trading-day purposes — Jakarta-local (WIB, UTC+7), not
+    whatever timezone the process happens to run in. Matters for real: a
+    UTC-clocked container can already be a trading day behind Jakarta — IDX
+    closes ~16:00 WIB, and confirmed live a container reading UTC 2026-09-28
+    was already 2026-09-29 00:24 in Jakarta, a full trading day apart (see
+    PROGRESS.md's backfill-gap fix). Every plain `date.today()` call anywhere
+    that means "today, for IDX purposes" should go through this instead."""
+    return datetime.now(IDX_TIMEZONE).date()
 
 # Field classification for screener epoch selection. See plan section 3.
 # TODO: verify this grouping against the actual field list on the Screener page.
@@ -56,7 +70,7 @@ def resolve_latest_year(today: date | None = None) -> int:
     The Sectors docs note this shifts meaning between January and April
     (annual reports land through Q1). TODO: verify the exact cutoff.
     """
-    today = today or date.today()
+    today = today or idx_today()
     return today.year - 1 if today.month < 4 else today.year
 
 

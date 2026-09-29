@@ -168,3 +168,27 @@ CREATE TABLE IF NOT EXISTS role_tier_config (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, role_id)
 );
+
+-- Background LLM-as-judge eval runs, triggered from admin-ui's Evals page
+-- (gateway/eval_runner.py). One row per run so a user can close the tab and
+-- check the result later — status/completed/total are polled while running.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           TEXT NOT NULL,
+    judge_provider    TEXT NOT NULL,
+    judge_model       TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'pending',  -- pending | running | done | error | cancelled
+    total             INT NOT NULL DEFAULT 0,
+    completed         INT NOT NULL DEFAULT 0,
+    -- Set by POST .../evals/{id}/cancel; eval_runner.py checks this between
+    -- conversations (it already touches the DB once per conversation anyway,
+    -- for progress) and stops there rather than killing the thread outright —
+    -- there is no clean way to interrupt a judge LLM call already in flight.
+    cancel_requested  BOOLEAN NOT NULL DEFAULT false,
+    summary           JSONB,
+    error             TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS eval_runs_created_at_idx ON eval_runs (created_at DESC);
+ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT false;

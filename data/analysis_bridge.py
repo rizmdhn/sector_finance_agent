@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from analysis import fundamentals, liquidity, portfolio, returns, valuation
 from analysis.types import UNAVAILABLE, Number, is_missing
 from data.cache import Cache
+from data.canonical import idx_today
 from data.db import Database
 from data.repositories import PERIOD_TO_DAYS, ensure_valid_symbol, get_company_report
 from data.sectors_client import SectorsClient
@@ -81,7 +82,7 @@ def liquidity_snapshot(
     `analysis/liquidity.py::adv20`'s no-silent-gap-filling rule.
     """
     canonical = ensure_valid_symbol(db, symbol)
-    end = db.latest_trade_date() or date.today()
+    end = db.latest_trade_date() or idx_today()
     start = end - timedelta(days=sessions * 2)  # calendar-day pad for weekends/holidays
     rows = db.read_price_range(canonical, start, end)[-sessions:]
 
@@ -111,7 +112,7 @@ def returns_snapshot(db: Database, symbol: str, period: str) -> dict:
     days = PERIOD_TO_DAYS.get(period)
     if days is None:
         raise ValueError(f"unknown period: {period}")
-    end = db.latest_trade_date() or date.today()
+    end = db.latest_trade_date() or idx_today()
     start = end - timedelta(days=days)
     rows = db.read_price_range(canonical, start, end)
 

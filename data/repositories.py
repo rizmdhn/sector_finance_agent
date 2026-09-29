@@ -12,6 +12,7 @@ from data.canonical import (
     cache_key,
     canonicalize_screener_query,
     canonicalize_symbol,
+    idx_today,
     screener_field_classes,
 )
 from data.db import Database
@@ -142,7 +143,7 @@ def get_price_history(db: Database, symbol: str, period: str) -> list[dict]:
     days = PERIOD_TO_DAYS.get(period)
     if days is None:
         raise ValueError(f"unknown period: {period}")
-    end = db.latest_trade_date() or date.today()
+    end = db.latest_trade_date() or idx_today()
     start = end - timedelta(days=days)
     return db.read_price_range(symbol, start, end)
 

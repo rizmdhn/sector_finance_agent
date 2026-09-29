@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
 import Chat from "./pages/Chat";
+import Evals from "./pages/Evals";
 import Login from "./pages/Login";
 import Memory from "./pages/Memory";
 import ModelTiering from "./pages/ModelTiering";
 import { checkSession, logout } from "./api/auth";
 import "./styles.css";
 
-type Tab = "chat" | "memory" | "model-tiering";
+type Tab = "chat" | "memory" | "model-tiering" | "evals";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "chat", label: "Chat" },
   { id: "memory", label: "Memory" },
   { id: "model-tiering", label: "Model Tiering" },
+  { id: "evals", label: "Evals" },
 ];
 
 const USER_ID_KEY = "idx-admin-ui.user-id.v1";
@@ -105,6 +107,7 @@ export default function App() {
         {tab === "chat" && <Chat userId={userId} />}
         {tab === "memory" && <Memory userId={userId} />}
         {tab === "model-tiering" && <ModelTiering userId={userId} />}
+        {tab === "evals" && <Evals userId={userId} />}
       </main>
     </div>
   );

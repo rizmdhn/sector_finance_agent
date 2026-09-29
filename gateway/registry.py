@@ -106,15 +106,24 @@ def build_model(entry: ModelEntry) -> Model:
         # is present at all, even as a no-op default.
         params = {"output_config": {"effort": entry.effort}} if entry.effort else None
 
+        # ttl="1h": Anthropic's extended cache TTL, not the 5-minute default a bare
+        # system_prompt_ttl=True would fall back to. A chat session realistically
+        # idles for minutes between messages — the 5-min window was expiring and
+        # re-billing the full system prompt + tool schemas at uncached price on
+        # most real turns, not just the first one per session. The 1h write costs
+        # 2x a 5m write, but a cached read is still ~1/10th price either way, so
+        # this pays for itself after the second hit within the hour, which a real
+        # back-and-forth conversation clears easily.
         return AnthropicModel(
             client_args={"api_key": api_key},
             model_id=entry.model_id,
             max_tokens=4096,
-            cache_config=CacheConfig(strategy="anthropic", system_prompt_ttl=True, tools_ttl=True),
+            cache_config=CacheConfig(strategy="anthropic", ttl="1h", system_prompt_ttl=True, tools_ttl=True),
             params=params,
         )
 
     if entry.provider == "openai":
+        from strands.models.model import CacheConfig
         from strands.models.openai import OpenAIModel
 
         # Reuses the same `effort` YAML field as the Anthropic branch above, but
@@ -132,9 +141,18 @@ def build_model(entry: ModelEntry) -> Model:
             client_args={"api_key": api_key},
             model_id=entry.model_id,
             params=params,
+            # OpenAI caches prompt prefixes automatically server-side but routes
+            # cache reads on a caller-supplied `prompt_cache_key` — with none set
+            # (the state before this), every request had no explicit routing hint
+            # at all. A bare CacheConfig() derives `strands-<session_id>` per
+            # Strands' own default, keeping one session's repeat calls routed to
+            # the same cache partition. Free — OpenAI's own caching costs nothing
+            # extra, this only improves the odds of actually hitting it.
+            cache_config=CacheConfig(),
         )
 
     if entry.provider == "openai_responses":
+        from strands.models.model import CacheConfig
         from strands.models.openai_responses import OpenAIResponsesModel
 
         # A separate provider, not just another `openai` entry with a different
@@ -155,6 +173,7 @@ def build_model(entry: ModelEntry) -> Model:
             client_args={"api_key": api_key},
             model_id=entry.model_id,
             params=params,
+            cache_config=CacheConfig(),  # same reasoning as the `openai` branch above
         )
 
     raise ValueError(f"unsupported provider: {entry.provider}")

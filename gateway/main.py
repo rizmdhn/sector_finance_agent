@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from gateway import compat, memory_extraction
+from gateway import compat, eval_runner, memory_extraction
 from gateway.agent import build_agent
 from gateway.guardrails import (
     RateLimitExceededError,
@@ -403,6 +403,86 @@ def update_model_tier(role: str, body: UpdateTierRequest) -> dict:
         )
     get_db().set_role_tier(body.user, role, body.tier)
     return {"user": body.user, "role": role, "tier": body.tier}
+
+
+class CreateEvalRunRequest(BaseModel):
+    user: str
+    # A real models.yaml entry name (same registry admin-ui's Model Tiering page
+    # already lists), not a raw provider/model_id pair — the judge is just
+    # another registry model, picked the same way a role's model is picked.
+    model: str
+    limit: int = 50
+
+
+@app.post("/v1/admin/evals", dependencies=[Depends(_check_auth)])
+def create_eval_run(body: CreateEvalRunRequest) -> dict:
+    """Kick off a background LLM-as-judge eval run (gateway/eval_runner.py) over
+    the most recent real gateway conversations, graded by the chosen registry
+    model. Runs in Starlette's threadpool via BackgroundTask (eval_runner.run_eval
+    is sync — judge calls are blocking network I/O), so the request returns
+    immediately with a run id admin-ui polls via GET .../evals/{id}; the run
+    itself keeps going even if that tab is closed, same as memory extraction's
+    BackgroundTask pattern above.
+    """
+    if body.model not in _registry:
+        raise HTTPException(status_code=400, detail=f"unknown model: {body.model!r}")
+    entry = _registry[body.model]
+    if entry.model_id == PLACEHOLDER_MODEL_ID:
+        raise HTTPException(status_code=400, detail=f"{body.model!r} has no usable model_id yet")
+
+    # phoenix.evals' LLM wrapper only knows "anthropic"/"openai" as provider
+    # names — openai_responses is a Strands-only distinction (tool-calling API
+    # shape), irrelevant for a judge that only classifies plain text.
+    judge_provider = "anthropic" if entry.provider == "anthropic" else "openai"
+
+    db = get_db()
+    run_id = db.create_eval_run(body.user, judge_provider, entry.model_id)
+    background = BackgroundTask(eval_runner.run_eval, db, run_id, judge_provider, entry.model_id, body.limit)
+    return JSONResponse({"id": run_id}, background=background)
+
+
+@app.get("/v1/admin/evals", dependencies=[Depends(_check_auth)])
+def list_eval_runs(limit: int = 20) -> dict:
+    return {"data": [_serialize_eval_run(row) for row in get_db().list_eval_runs(limit)]}
+
+
+@app.get("/v1/admin/evals/{run_id}", dependencies=[Depends(_check_auth)])
+def get_eval_run(run_id: int) -> dict:
+    row = get_db().get_eval_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="eval run not found")
+    return _serialize_eval_run(row)
+
+
+@app.post("/v1/admin/evals/{run_id}/cancel", dependencies=[Depends(_check_auth)])
+def cancel_eval_run(run_id: int) -> dict:
+    """Only sets a flag — gateway/eval_runner.py's run_eval checks it once per
+    conversation and stops there, since a judge LLM call already sent can't be
+    interrupted mid-flight. Status stays 'running' until it actually notices."""
+    row = get_db().get_eval_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="eval run not found")
+    applied = get_db().request_eval_run_cancel(run_id)
+    if not applied:
+        raise HTTPException(status_code=400, detail=f"run is already {row['status']}, nothing to cancel")
+    return {"id": run_id, "cancel_requested": True}
+
+
+def _serialize_eval_run(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "judge_provider": row["judge_provider"],
+        "judge_model": row["judge_model"],
+        "status": row["status"],
+        "cancel_requested": row["cancel_requested"],
+        "total": row["total"],
+        "completed": row["completed"],
+        "summary": row["summary"],
+        "error": row["error"],
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+    }
 
 
 def _short_circuit_title_response(model_name: str) -> JSONResponse:
