@@ -27,6 +27,10 @@ REFERENCE_LISTS = {
     "subindustries": lambda client: client.get_subindustries(),
     "news_tags": lambda client: client.get_news_tags(),
     "broker_registry": lambda client: client.get_broker_registry(),
+    # Whole-market, one row per symbol {"symbol", "company_name", "free_float"} —
+    # confirmed live (2026-09-29), see data/repositories.py::get_free_float for the
+    # per-symbol lookup this feeds. Backs analysis/liquidity.py's free_float_capacity.
+    "free_float": lambda client: client.get_free_float(),
 }
 
 

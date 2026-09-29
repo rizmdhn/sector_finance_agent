@@ -31,7 +31,9 @@ def analyze_portfolio(positions: dict[str, float], cash: float) -> dict:
 
 
 @tool
-def analyze_liquidity(symbol: str, position_value: float, participation_rate: float = 0.1) -> dict:
+def analyze_liquidity(
+    symbol: str, position_value: float, participation_rate: float = 0.1, position_shares: float | None = None
+) -> dict:
     """Estimate a position's normal-conditions liquidity: ADV20 (20-session median
     traded value) and the number of sessions to exit at a given participation rate.
 
@@ -39,8 +41,22 @@ def analyze_liquidity(symbol: str, position_value: float, participation_rate: fl
         symbol: IDX ticker, e.g. "BBCA".
         position_value: Value of the position to be exited.
         participation_rate: Fraction of ADV20 assumed executable per session.
+        position_shares: Share count for the same position — pass this too to also
+            get free_float_capacity (position shares / free-float shares). Costs 1
+            Sectors credit the first time for this symbol (shares outstanding lookup),
+            free after that; omit for the usual zero-credit liquidity-only result.
     """
-    return analysis_bridge.liquidity_snapshot(get_db(), symbol, position_value, participation_rate)
+    if position_shares is None:
+        return analysis_bridge.liquidity_snapshot(get_db(), symbol, position_value, participation_rate)
+    return analysis_bridge.liquidity_snapshot(
+        get_db(),
+        symbol,
+        position_value,
+        participation_rate,
+        position_shares=position_shares,
+        cache=get_cache(),
+        client=get_client(),
+    )
 
 
 @tool

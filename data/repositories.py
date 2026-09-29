@@ -90,6 +90,55 @@ def get_company_report(
     return result
 
 
+# -- Shareholders composition: CACHE, keyed per symbol -------------------------
+# Confirmed live (2026-09-29) against company/shareholders-composition/{symbol}/:
+# a bare dict {"symbol", "year", "data": [...]}, one entry per month, each with
+# local/foreign holder-category breakdowns (insurance_l/_f, corporate_l/_f, ...,
+# total_l, total_f), numbers_of_shareholders, and change_in_shareholders. This is
+# ownership COMPOSITION by holder category and domestic/foreign split — it does
+# NOT name individual major shareholders or map holdings to a controlling group;
+# that remains portfolio-intelligence-data-gap-analysis-v1.md's G1 (real gap, no
+# such endpoint exists). Keyed off the symbol version epoch, same bucket as
+# get_company_report's non-price-linked sections (financials/dividend/management/
+# ownership) — this data changes on a reporting cadence, not daily price moves.
+
+
+def get_shareholders_composition(cache: Cache, db: Database, client: SectorsClient, symbol: str) -> dict:
+    symbol = ensure_valid_symbol(db, symbol)
+    epoch = cache.get_symbol_version(symbol)
+    key = cache_key("shareholders_composition", {"symbol": symbol}, epoch=epoch)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    with cache.acquire_lock(f"shareholders_composition:{symbol}"):
+        cached = cache.get(key)
+        if cached is None:
+            cached = client.get_shareholders_composition(symbol)
+            cache.set(key, cached)
+    return cached
+
+
+# -- Free float: REFERENCE, whole-market weekly list ---------------------------
+# ingest/jobs/symbol_master.py's weekly REFERENCE_LISTS sweep already pulls and
+# stores this (reference_lists table, name="free_float") — this is just the
+# per-symbol lookup into that already-ingested list. Zero Sectors API credit:
+# reads Postgres only, same as the other REFERENCE-strategy lookups.
+
+
+def get_free_float(db: Database, symbol: str) -> float | None:
+    """`free_float` is a fraction of total shares outstanding (e.g. 0.9989 = 99.89%
+    free float), confirmed live (2026-09-29) — one row per symbol,
+    {"symbol", "company_name", "free_float"}. Linear scan over ~961 rows: cheap,
+    refreshed weekly, not worth a dedicated indexed table for this."""
+    symbol = ensure_valid_symbol(db, symbol)
+    rows = db.get_reference_list("free_float") or []
+    for row in rows:
+        if row.get("symbol") == symbol:
+            return row.get("free_float")
+    return None
+
+
 # -- Screener: CACHE, canonical query -> top-200 rows -------------------------
 
 

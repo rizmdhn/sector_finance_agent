@@ -135,8 +135,8 @@ system prompts say so explicitly rather than fabricating coverage.
 | Role | Tools | Covers | Doesn't cover yet |
 |---|---|---|---|
 | **Chief Portfolio Intelligence Orchestrator** | none (delegates + memory) | Decides which specialist(s) a question needs, synthesizes findings, preserves hedges rather than tightening them into settled fact | — |
-| **Investment Research Lead** (`gateway/roles/investment_research.py`) | `get_company_report`, `get_price_history`, `analyze_fundamentals`, `screen_companies` | Company economics, financial quality, valuation for one company at a time | Ownership/governance; thesis monitoring against a recorded thesis |
-| **Portfolio Risk Lead** (`gateway/roles/portfolio_risk.py`) | `analyze_portfolio`, `analyze_liquidity`, `analyze_returns` (Postgres-only, zero Sectors credit) | Exposure/concentration, single-position exit liquidity | Covariance, stress-testing, benchmark comparison; no direct access to mandate limits (Chief pairs those from memory itself) |
+| **Investment Research Lead** (`gateway/roles/investment_research.py`) | `get_company_report`, `get_price_history`, `analyze_fundamentals`, `analyze_ownership`, `screen_companies` | Company economics, financial quality, valuation, ownership composition (local/foreign holder split, free float %) for one company at a time | Named major shareholders or a controlling-group mapping (no data source has this — see G1 below); thesis monitoring against a recorded thesis |
+| **Portfolio Risk Lead** (`gateway/roles/portfolio_risk.py`) | `analyze_portfolio`, `analyze_liquidity` (optionally with free-float capacity), `analyze_returns` (Postgres-only + one 1-credit-then-free lookup for free-float capacity) | Exposure/concentration, single-position exit liquidity, free-float capacity | Covariance, stress-testing, benchmark comparison; no direct access to mandate limits (Chief pairs those from memory itself) |
 | **Market and Event Intelligence Lead** (`gateway/roles/market_intelligence.py`) | price/volume moves, foreign flow, broker activity, filings, corporate actions, news | Descriptive "what moved and why" | No statistical significance test for "unusual"; `symbol`/`date` filters on filings/news/foreign-flow are unconfirmed |
 | **Independent Risk and Evidence Officer** (`gateway/roles/independent_risk_officer.py`) | same data tools as the other three (can reproduce a calculation) | Reviews a draft answer's evidence/calculations → PASS / PASS WITH LIMITATIONS / REVISE / DATA BLOCKED / HUMAN ESCALATION | Most expensive step per question — Chief calls it selectively, not on every question |
 
@@ -263,6 +263,8 @@ Sectors bills roughly 1 credit per report *section* requested, not per call:
 | `screen "<where>"` | `companies/` | 1 credit per distinct query | 0 for an identical repeat, until TTL expires |
 | `run-job universe_close` (whole market) | `close/`, paginated | ~33 credits (962 symbols ÷ 30/page) | shared across every symbol/user — run once/day |
 | `analyze-portfolio` / `-liquidity` / `-returns` | Postgres only | **0** | **0** — never calls the Sectors API |
+| `analyze_ownership` (agent tool) | `company/shareholders-composition/{symbol}` | 1 credit | 0, until the symbol's data version bumps |
+| `analyze_liquidity` with `position_shares` (free-float capacity) | same endpoint, for shares outstanding | 1 credit first time per symbol | 0 after — free float % itself is a free weekly Postgres read |
 
 **Bringing one brand-new ticker fully online costs 3 credits, once:**
 `backfill-price` + `get-report overview` + `analyze-fundamentals`'s `financials`
@@ -278,9 +280,6 @@ free until the underlying data actually changes.
 - **Valkey has no persistent backstop** — a cache flush or restart without a
   volume re-pays every 1-credit-per-section call. A Postgres JSONB mirror would
   make the spend durable across restarts.
-- **`free_float/` is not wired to anything yet** — the client method exists, no
-  ingest job calls it, so `analysis/liquidity.py::free_float_capacity` has no
-  real data source.
 - **Onboard tickers in batches**, not one at a time mid-conversation — same total
   cost, but avoids surprise per-message spend during analysis.
 

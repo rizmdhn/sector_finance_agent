@@ -43,17 +43,25 @@ business doc already anticipates: disclosed as coverage limitations, not fabrica
 
 ## Gaps
 
-### G1 — Controlling-group / corporate-group mapping
+### G1 — Controlling-group / corporate-group mapping (narrowed 2026-09-29)
 
 **Requirement affected:** Section 3 ("issuer, sector, controlling-group, and common
 economic exposures"), section 4 (Portfolio Risk Lead: "controlling-group weight"),
 Appendix B (controlling-group weight thresholds), Appendix C ("several holdings share
 a controller").
 
-**Gap:** Sectors' Shareholders Composition endpoint returns major shareholders *per
-company*. There is no endpoint that returns a pre-built cross-company group taxonomy
-(e.g. "these N tickers all roll up to Group X"). Building that requires either manual
-curation or a separate data source; it does not exist as a queryable field.
+**Gap:** Sectors' Shareholders Composition endpoint (`company/shareholders-
+composition/{symbol}/`) returns ownership *composition by holder category*
+(insurance, corporate, pension fund, mutual fund, individual, etc., split
+local/foreign) and a shareholder-count trend — confirmed live 2026-09-29, now wired
+into `analyze_ownership` (`gateway/tools/company_report.py`, backed by
+`data/analysis_bridge.py::ownership_snapshot`). It does NOT return named individual
+major shareholders, and there is no endpoint that returns a pre-built cross-company
+group taxonomy (e.g. "these N tickers all roll up to Group X"). Building the group
+mapping requires either manual curation or a separate data source; it does not exist
+as a queryable field. This is narrower than originally scoped: the "ownership
+composition" half of "ownership and governance" is now real data, not a gap — only
+the controlling-group identity/mapping half remains unavailable.
 
 **Analytical impact:** Controlling-group weight (Appendix B threshold) and the
 "several holdings share a controller" acceptance case (Appendix C) cannot be computed

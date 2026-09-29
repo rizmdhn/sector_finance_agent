@@ -22,7 +22,13 @@ from analysis.types import UNAVAILABLE, Number, is_missing
 from data.cache import Cache
 from data.canonical import idx_today
 from data.db import Database
-from data.repositories import PERIOD_TO_DAYS, ensure_valid_symbol, get_company_report
+from data.repositories import (
+    PERIOD_TO_DAYS,
+    ensure_valid_symbol,
+    get_company_report,
+    get_free_float,
+    get_shareholders_composition,
+)
 from data.sectors_client import SectorsClient
 
 PRICE_LABEL_CAVEAT = (
@@ -74,12 +80,23 @@ def liquidity_snapshot(
     position_value: Number,
     participation_rate: float = 0.1,
     sessions: int = 20,
+    *,
+    position_shares: float | None = None,
+    cache: Cache | None = None,
+    client: SectorsClient | None = None,
 ) -> dict:
     """ADV20 (20-session median traded value) and normal-conditions exit days for
     one symbol, from ingested `price_daily` volume/close. Returns `UNAVAILABLE` for
     `adv20`/`normal_exit_days` if fewer than `sessions` sessions have been ingested
     yet or any session in the window has a null close/volume — see
     `analysis/liquidity.py::adv20`'s no-silent-gap-filling rule.
+
+    `position_shares` is optional and keyword-only, deliberately not part of the
+    original zero-credit signature: passing it (with `cache`/`client`, needed to
+    look up shares outstanding — see below) additionally computes Appendix A's
+    free_float_capacity (position shares / free-float shares). Omitted, this
+    function's cost stays exactly what its module docstring promises: zero Sectors
+    credit, Postgres-only, however often called.
     """
     canonical = ensure_valid_symbol(db, symbol)
     end = db.latest_trade_date() or idx_today()
@@ -95,13 +112,27 @@ def liquidity_snapshot(
     adv20_value = liquidity.adv20(daily_traded_values)
     exit_days = liquidity.normal_exit_days(position_value, adv20_value, participation_rate)
 
-    return {
+    result = {
         "symbol": canonical,
         "sessions_used": len(rows),
         "sessions_requested": sessions,
         "adv20": adv20_value,
         "normal_exit_days": exit_days,
     }
+
+    if position_shares is not None:
+        if cache is None or client is None:
+            raise ValueError("position_shares requires cache and client (needed for shares outstanding)")
+        free_float_fraction = get_free_float(db, canonical)
+        shares_outstanding = _latest_shares_outstanding(get_shareholders_composition(cache, db, client, canonical))
+        free_float_shares: Number = (
+            free_float_fraction * shares_outstanding
+            if free_float_fraction is not None and shares_outstanding is not None
+            else UNAVAILABLE
+        )
+        result["free_float_capacity"] = liquidity.free_float_capacity(position_shares, free_float_shares)
+
+    return result
 
 
 def returns_snapshot(db: Database, symbol: str, period: str) -> dict:
@@ -324,4 +355,73 @@ def fundamentals_snapshot(cache: Cache, db: Database, client: SectorsClient, sym
         "general": general,
         "bank": bank,
         "valuation": valuation_snapshot,
+    }
+
+
+_HOLDER_CATEGORIES = (
+    "insurance",
+    "corporate",
+    "pension_fund",
+    "financial_institutions",
+    "individual",
+    "mutual_fund",
+    "securities_companies",
+    "foundation",
+    "other",
+)
+
+
+def _latest_shares_outstanding(composition: dict) -> int | None:
+    rows = composition.get("data") or []
+    return rows[0].get("shares_number") if rows else None
+
+
+def ownership_snapshot(cache: Cache, db: Database, client: SectorsClient, symbol: str) -> dict:
+    """Ownership composition (local/foreign split by holder category) and the
+    shareholder-count trend, from `company/shareholders-composition/{symbol}/`
+    (CACHE strategy: 1 credit on the first call for a symbol, free after that
+    until the symbol's data version changes).
+
+    This covers "free float" and part of "ownership and governance" from the
+    business doc's Investment Research Lead table — NOT control/related-party
+    exposure or corporate-group mapping. No endpoint returns a named-shareholder
+    or cross-company group taxonomy (portfolio-intelligence-data-gap-analysis-v1.md
+    G1) — that remains a real, undisclosed gap, not something this function
+    papers over.
+    """
+    canonical = ensure_valid_symbol(db, symbol)
+    composition = get_shareholders_composition(cache, db, client, canonical)
+    rows = composition.get("data") or []
+    if not rows:
+        return {"symbol": canonical, "as_of": None, "holders": {}, "free_float_pct": None}
+
+    latest = rows[0]
+    shares_outstanding = latest.get("shares_number")
+    holders = {}
+    for category in _HOLDER_CATEGORIES:
+        local = latest.get(f"{category}_l")
+        foreign = latest.get(f"{category}_f")
+        holders[category] = {"local_shares": local, "foreign_shares": foreign}
+
+    free_float_fraction = get_free_float(db, canonical)
+
+    prior_count = rows[1]["numbers_of_shareholders"] if len(rows) > 1 else None
+
+    return {
+        "symbol": canonical,
+        "as_of": latest.get("date"),
+        "shares_outstanding": shares_outstanding,
+        "total_local_shares": latest.get("total_l"),
+        "total_foreign_shares": latest.get("total_f"),
+        "holders_by_category": holders,
+        "number_of_shareholders": latest.get("numbers_of_shareholders"),
+        "change_in_shareholders": latest.get("change_in_shareholders"),
+        "prior_month_shareholders": prior_count,
+        "free_float_pct": free_float_fraction,
+        "_coverage_note": (
+            "Composition by holder category and domestic/foreign split only — no "
+            "named major shareholders and no corporate-group/controlling-group "
+            "mapping is available from this or any other endpoint (see "
+            "portfolio-intelligence-data-gap-analysis-v1.md G1)."
+        ),
     }

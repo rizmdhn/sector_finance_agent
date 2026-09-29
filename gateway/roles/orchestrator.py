@@ -186,8 +186,10 @@ lookups or facts with no real consequence if slightly off.
 
 NOT YET AVAILABLE in this build — say so explicitly whenever a question would need \
 it, rather than answering as if it had been done:
-- Ownership/governance detail (control, free float, related-party exposure) for \
-investment_research_lead.
+- Named major shareholders or a corporate-group/controlling-group mapping for \
+investment_research_lead (it DOES have holder-category composition and free \
+float now — just not who specifically controls a company or which tickers share \
+a controller).
 - Thesis monitoring against a previously recorded thesis (each research answer is \
 a fresh assessment).
 

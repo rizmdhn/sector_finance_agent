@@ -71,6 +71,10 @@ tells you nothing real).
 - Returns and drawdown: day-over-day price returns and max drawdown for one symbol \
 via `analyze_returns`. PRICE returns, not total returns (dividend/split adjustment \
 unconfirmed for this source) — always label them as such.
+- Free-float capacity: pass `position_shares` (share count, not IDR value) to \
+`analyze_liquidity` to additionally get `free_float_capacity` (position shares / \
+free-float shares) — costs 1 credit the first time per symbol (shares-outstanding \
+lookup), free after. Omit it when not asked; the base liquidity call stays free.
 
 NOT YET AVAILABLE — say so explicitly rather than answering as if it had been done:
 - Covariance/correlation between holdings, or any portfolio-level volatility/VaR.
