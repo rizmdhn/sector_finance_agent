@@ -53,6 +53,14 @@ def load_registry(path: Path | str = DEFAULT_REGISTRY_PATH) -> dict[str, ModelEn
 PLACEHOLDER_MODEL_ID = "TODO"
 
 
+def _has_usable_key(entry: ModelEntry) -> bool:
+    """Same "set but blank counts as unusable" check as build_model()'s own —
+    kept separate rather than calling build_model() itself here, since this only
+    needs to know if it's WORTH trying, not build a real client (which has real
+    side effects and a cost for some providers to construct)."""
+    return bool(os.environ.get(entry.key_ref))
+
+
 def select_for_tier(registry: dict[str, ModelEntry], tier: str, default: ModelEntry) -> ModelEntry:
     """Pick a usable model entry of the given tier from the registry, falling back
     to `default` (the request's own model_entry) when no such entry is configured
@@ -72,11 +80,33 @@ def select_for_tier(registry: dict[str, ModelEntry], tier: str, default: ModelEn
     function is substituting a DIFFERENT tier's model in for a role that needs
     more/less capability than what was requested; when the role's tier already
     matches what was requested, there's nothing to substitute.
+
+    Both the short-circuit and the scan now additionally require a usable API key
+    (`_has_usable_key`) — a second real bug found live (2026-09-30): a brand-new
+    admin-ui user who never visits Model Tiering runs on DEFAULT_ROLE_TIERS'
+    plain "cheap" for every role, and `default` there is whatever the TOP-LEVEL
+    request asked for (admin-ui's hardcoded chat default, `idx-analyst-claude`).
+    With only an OpenAI key configured, the old short-circuit returned Claude
+    anyway (tier matched, key ignorance), and the ONLY reason it ever recovered
+    at all was gateway/main.py's build-time-failure-triggered fallback chain —
+    a real failed attempt every time, not "automatically" in any sense a user
+    would recognize. Now a same-tier entry with no usable key is skipped in
+    favor of one that has one, so the right provider gets picked on the FIRST
+    try for every tier-only role — the failure-and-retry path stays as a safety
+    net for an explicit by-name pick (gateway/roles/orchestrator.py::model_for
+    checks the registry by name BEFORE ever calling this function, deliberately
+    not key-checked — an explicit pick is the user's own call to make), not the
+    normal path for tier-only users anymore.
     """
-    if default.tier == tier:
+    if default.tier == tier and _has_usable_key(default):
         return default
     for entry in registry.values():
-        if entry.tier == tier and entry.supports_tools and entry.model_id != PLACEHOLDER_MODEL_ID:
+        if (
+            entry.tier == tier
+            and entry.supports_tools
+            and entry.model_id != PLACEHOLDER_MODEL_ID
+            and _has_usable_key(entry)
+        ):
             return entry
     return default
 

@@ -68,6 +68,68 @@ docker compose exec agent-gateway python -c "from data.deps import get_db; get_d
 the `ADMIN_PASSWORD` you set in step 1. That's it — chat, memory, model settings,
 and evals are all in there.
 
+**Step 5 — load market data, once.** The ingest worker only runs on a schedule
+(symbol list weekly, prices in a daily post-close window) — right after step 2 it
+hasn't fired yet, so chat questions about real tickers will come back empty. Seed
+it manually so data shows up immediately instead of waiting for the next scheduled
+run:
+
+```bash
+docker compose exec ingest-worker python -c "
+from data.deps import get_db, get_cache, get_client
+from ingest.jobs import symbol_master, universe_close
+db, cache, client = get_db(), get_cache(), get_client()
+symbol_master.run(db, cache, client)   # symbol list — must run first
+universe_close.run(db, cache, client)  # today's close prices
+print('seeded')
+"
+```
+
+`symbol_master` must run before `universe_close` — prices get validated against
+the symbol list it builds. This costs real Sectors credit (~33 credits for the
+whole-market close pull — see [Credit cost per ticker](#credit-cost-per-ticker)
+below); it only needs to run once, not on every restart. `universe_close` pages through ~33 calls in one go — on a fresh/low-tier Sectors
+plan you may see a real `429 Too Many Requests` partway through (confirmed live);
+that's Sectors' own rate limit, not a bug. `symbol_master` isn't idempotent-cheap
+(it re-fetches everything, real credit, every call) — once it's succeeded once,
+wait a bit and retry with just the `universe_close` half:
+```bash
+docker compose exec ingest-worker python -c "
+from data.deps import get_db, get_cache, get_client
+from ingest.jobs import universe_close
+universe_close.run(get_db(), get_cache(), get_client())
+print('seeded')
+"
+```
+
+> **If the ingest worker was down for a while** (container crashed, host was off,
+> you stopped the stack overnight): `universe_close` automatically catches up any
+> trading days it missed the next time it runs — it's not limited to "today" only.
+> Capped at 14 calendar days back by design, so a long outage doesn't silently
+> trigger hundreds of API calls on restart (each missed day costs its own ~33
+> credits — see that job's own comments in `ingest/jobs/universe_close.py` for
+> why). If the gap is longer than that, or you just want to double-check what's
+> actually in the database, run the same seed command above again — it's safe to
+> re-run any time — or check the current gap directly:
+> ```bash
+> docker compose exec agent-gateway python -c "
+> from data.deps import get_db
+> from data.canonical import idx_today
+> print('latest ingested trade date:', get_db().latest_trade_date())
+> print('today (Jakarta):', idx_today())
+> "
+> ```
+> A single ticker missing *volume* specifically (close is there, volume isn't —
+> `universe_close`'s bulk feed never includes it) is a different, per-symbol gap —
+> fixed with one 1-credit call, not a re-run of the above:
+> ```bash
+> docker compose exec agent-gateway python -c "
+> from data.deps import get_db, get_client
+> from data.repositories import ensure_price_detail
+> ensure_price_detail(get_db(), get_client(), 'BBCA')  # swap in the real ticker
+> "
+> ```
+
 This is a local-only setup with no HTTPS — don't expose it on the public internet
 as-is; put a proxy (Caddy, nginx, a cloud load balancer) in front of it first.
 
