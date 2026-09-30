@@ -2,8 +2,8 @@
 
 from datetime import date
 
-from data.sectors_client import SectorsAPIError
-from ingest.jobs.universe_close import MAX_BACKFILL_DAYS, _weekdays_between, run
+from data.sectors_client import SectorsAPIError, SectorsRateLimitError
+from ingest.jobs.universe_close import BOOTSTRAP_BACKFILL_DAYS, MAX_BACKFILL_DAYS, _weekdays_between, run
 
 
 def test_weekdays_between_skips_weekend():
@@ -112,3 +112,45 @@ def test_run_caps_backfill_depth():
     run(db, cache, client, today=today)
 
     assert len(calls) <= MAX_BACKFILL_DAYS + 1  # +1 for weekday/weekend rounding slack
+
+
+def test_run_honors_smaller_bootstrap_window_on_empty_database():
+    """Real bug found live (2026-10-01): a fresh install's first ingest run used
+    to backfill the full MAX_BACKFILL_DAYS window (~330 calls) in one burst
+    alongside symbol_master's own bootstrap sweep, tripping Sectors' 429 rate
+    limit. ingest/scheduler.py now passes BOOTSTRAP_BACKFILL_DAYS (much smaller)
+    for that one-time call — this checks `run` actually honors the override
+    rather than a smaller value silently being ignored."""
+    today = date(2026, 9, 29)
+    db = _FakeDB(latest=None)
+    cache = _FakeCache()
+    client = _FakeClient(landed_dates=set())
+
+    calls = []
+    real_get = client.get_daily_universe_close
+    client.get_daily_universe_close = lambda trade_date, offset=0: (calls.append(trade_date), real_get(trade_date, offset))[1]
+
+    run(db, cache, client, today=today, max_backfill_days=BOOTSTRAP_BACKFILL_DAYS)
+
+    assert len(calls) <= BOOTSTRAP_BACKFILL_DAYS + 1
+    assert BOOTSTRAP_BACKFILL_DAYS < MAX_BACKFILL_DAYS
+
+
+def test_run_propagates_rate_limit_error_uncaught():
+    """A 429 partway through must surface to the caller (ingest/scheduler.py
+    catches it specifically) rather than being silently swallowed here."""
+
+    class _RateLimitedClient(_FakeClient):
+        def get_daily_universe_close(self, trade_date, offset=0):
+            raise SectorsRateLimitError(429, "rate limited")
+
+    today = date(2026, 9, 29)
+    db = _FakeDB(latest=None)
+    cache = _FakeCache()
+    client = _RateLimitedClient(landed_dates=set())
+
+    try:
+        run(db, cache, client, today=today, max_backfill_days=1)
+        assert False, "expected SectorsRateLimitError to propagate"
+    except SectorsRateLimitError:
+        pass

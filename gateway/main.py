@@ -402,14 +402,24 @@ def get_readiness() -> dict:
     """Lets admin-ui gate the real UI behind a "still setting up" screen instead of
     letting a user hit a confusing "unknown symbol" error on a fresh deploy whose
     ingest-worker hasn't finished its one-time seed yet (ingest/scheduler.py
-    bootstraps symbol_master/universe_close automatically on an empty database,
-    but that first sweep still takes a few seconds to a few minutes)."""
+    bootstraps symbol_master automatically on an empty database).
+
+    `price_data_ready` is reported but NOT required for `ready` — checked live
+    (2026-10-01): every price-dependent tool (analysis_bridge's portfolio/
+    liquidity/returns snapshots) already degrades gracefully to UNAVAILABLE /
+    missing_price_symbols when price_daily is empty, by the same design this
+    whole project uses for any missing data, rather than erroring. Company
+    reports, ownership, fundamentals and the screener don't touch price_daily at
+    all. Only symbol_master (every ticker lookup hard-fails without it) and a
+    usable model key are real blockers — gating on price data too would hold the
+    UI back over something the rest of the system already handles gracefully.
+    """
     db = get_db()
     symbol_master_ready = db.has_symbol_master()
     price_data_ready = db.latest_trade_date() is not None
     model_key_ready = any(has_usable_key(entry) for entry in _registry.values())
     return {
-        "ready": symbol_master_ready and price_data_ready and model_key_ready,
+        "ready": symbol_master_ready and model_key_ready,
         "symbol_master_ready": symbol_master_ready,
         "price_data_ready": price_data_ready,
         "model_key_ready": model_key_ready,

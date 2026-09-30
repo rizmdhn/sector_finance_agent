@@ -66,9 +66,21 @@ def sweep_symbol_master(client: SectorsClient) -> list[dict]:
     return rows
 
 
+def run_essential(db: Database, client: SectorsClient) -> None:
+    """Just the symbol master sweep — what `data/repositories.py::ensure_valid_symbol`
+    actually needs to stop rejecting every ticker as "unknown". Used for a fresh
+    install's first-boot bootstrap (ingest/scheduler.py): the full `run()` below adds
+    6 more calls for REFERENCE_LISTS (subsectors/industries/.../free_float) that back
+    screener filters and liquidity capacity — real features, but not required for a
+    first chat message to work, and every extra call on that first burst is extra risk
+    of the 429 found live (2026-10-01) combined with universe_close's own backfill
+    burst. Those lists still land on the normal Monday 3am sweep via `run()`."""
+    rows = sweep_symbol_master(client)
+    db.upsert_symbol_master([_row_to_symbol_master(r) for r in rows])
+
+
 def run(db: Database, cache: Cache, client: SectorsClient) -> None:
     for name, fetch in REFERENCE_LISTS.items():
         db.upsert_reference_list(name, fetch(client))
 
-    rows = sweep_symbol_master(client)
-    db.upsert_symbol_master([_row_to_symbol_master(r) for r in rows])
+    run_essential(db, client)

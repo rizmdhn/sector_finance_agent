@@ -10,9 +10,13 @@ import "./styles.css";
 
 const READINESS_POLL_MS = 5000;
 
-const READINESS_LABEL: Record<keyof Omit<ReadinessState, "ready">, string> = {
+// price_data_ready is intentionally excluded here — gateway/main.py's
+// get_readiness() doesn't require it for `ready` either. Every price-dependent
+// tool already degrades to UNAVAILABLE gracefully when price_daily is empty
+// (same as the project's usual missing-data handling), so it's shown as a
+// background-loading banner in the main shell instead of a blocking gate.
+const BLOCKING_READINESS_LABEL: Record<"symbol_master_ready" | "model_key_ready", string> = {
   symbol_master_ready: "Ticker list",
-  price_data_ready: "Price history",
   model_key_ready: "Model API key",
 };
 
@@ -106,16 +110,16 @@ export default function App() {
         <div className="setup-card">
           <h1>Setting up your data…</h1>
           <p>
-            First-time setup loads the ticker list and recent prices in the background. This page will update
-            automatically — no need to refresh.
+            First-time setup loads the ticker list in the background. This page will update automatically — no need
+            to refresh.
           </p>
           <ul className="setup-checklist">
-            {(Object.keys(READINESS_LABEL) as (keyof typeof READINESS_LABEL)[]).map((key) => {
+            {(Object.keys(BLOCKING_READINESS_LABEL) as (keyof typeof BLOCKING_READINESS_LABEL)[]).map((key) => {
               const done = readiness?.[key] ?? false;
               return (
                 <li key={key} className={done ? "setup-item setup-item--done" : "setup-item"}>
                   <span className="setup-item-dot" />
-                  {READINESS_LABEL[key]}
+                  {BLOCKING_READINESS_LABEL[key]}
                   {key === "model_key_ready" && !done && (
                     <span className="setup-item-note"> — add ANTHROPIC_API_KEY or OPENAI_API_KEY to .env</span>
                   )}
@@ -130,6 +134,12 @@ export default function App() {
 
   return (
     <div className="shell">
+      {!readiness.price_data_ready && (
+        <div className="price-data-banner">
+          Recent price history is still loading in the background — portfolio, liquidity and returns figures will
+          show as unavailable until it lands (usually within a few minutes).
+        </div>
+      )}
       <nav className="top-nav">
         <div className="top-nav-brand">IDX Portfolio Intelligence</div>
         <div className="top-nav-tabs">

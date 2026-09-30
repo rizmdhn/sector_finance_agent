@@ -97,6 +97,10 @@ class SectorsNotFoundError(SectorsAPIError):
     pass
 
 
+class SectorsRateLimitError(SectorsAPIError):
+    pass
+
+
 class SectorsClient:
     def __init__(
         self,
@@ -136,6 +140,16 @@ class SectorsClient:
             raise SectorsNotFoundError(404, response.text)
         if response.status_code == 400:
             raise SectorsAPIError(400, response.text)
+        if response.status_code == 429:
+            # Real bug found live (2026-10-01): our own TokenBucket only self-throttles
+            # to OUR guessed rate — it doesn't know Sectors' actual server-side limit,
+            # so a large burst (e.g. a fresh install's first ingest, hundreds of calls)
+            # can still get a 429 well below our internal cap. Left as raise_for_status()
+            # before this, this was an unhandled httpx.HTTPStatusError that crashed
+            # whichever job (or the whole ingest-worker process, if raised before the
+            # scheduler even started) was running — a dedicated error lets callers
+            # catch it and defer the rest of the work instead of taking the process down.
+            raise SectorsRateLimitError(429, response.text)
         response.raise_for_status()
         return response.json()
 

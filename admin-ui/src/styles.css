@@ -1114,6 +1114,15 @@
   color: #b23b3b;
 }
 
+.price-data-banner {
+  background: #fff7e0;
+  color: #6b5200;
+  font-size: 13px;
+  padding: 8px 16px;
+  text-align: center;
+  border-bottom: 1px solid #eddc9d;
+}
+
 .login-screen {
   min-height: 100svh;
   display: flex;

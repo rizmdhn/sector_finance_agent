@@ -3,11 +3,16 @@
 See idx_agent_infrastructure_diagrams_md.md section 7.
 """
 
+import logging
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from data.deps import get_cache, get_client, get_db
+from data.sectors_client import SectorsRateLimitError
 from ingest.jobs import symbol_master, universe_close
+
+logger = logging.getLogger(__name__)
 
 # quarterly_dates is deliberately not scheduled: its job now raises NotImplementedError
 # on every run (see ingest/jobs/quarterly_dates.py) since no working bulk endpoint was
@@ -30,12 +35,29 @@ def build_scheduler() -> BlockingScheduler:
     # first `docker compose up`) that leaves every ticker lookup failing with
     # "unknown symbol", or price data simply missing, until those windows hit,
     # unless someone remembers the README's manual seed steps. Bootstrap both once
-    # at startup instead, same jobs, same one-time cost, just automatic. symbol_master
-    # must land first — universe_close's rows key off it existing.
+    # at startup instead, same jobs, just automatic — trimmed to only what's
+    # essential for a first chat message to work (symbol_master.run_essential,
+    # universe_close's BOOTSTRAP_BACKFILL_DAYS) rather than the full weekly/outage
+    # scope, and each wrapped separately so a 429 partway through one doesn't take
+    # the other down too. symbol_master must land first — universe_close's rows
+    # key off it existing. The full REFERENCE_LISTS sweep and the rest of
+    # MAX_BACKFILL_DAYS' price history still land on their normal schedule below.
     if not db.has_symbol_master():
-        symbol_master.run(db, cache, client)
+        try:
+            symbol_master.run_essential(db, client)
+        except SectorsRateLimitError:
+            logger.warning(
+                "symbol_master bootstrap hit Sectors' rate limit — will retry on the "
+                "next scheduled run (Monday 3am WIB) instead of crashing the worker"
+            )
     if db.latest_trade_date() is None:
-        universe_close.run(db, cache, client)
+        try:
+            universe_close.run(db, cache, client, max_backfill_days=universe_close.BOOTSTRAP_BACKFILL_DAYS)
+        except SectorsRateLimitError:
+            logger.warning(
+                "universe_close bootstrap hit Sectors' rate limit — will retry on the "
+                "next scheduled poll (16-19h WIB) instead of crashing the worker"
+            )
 
     scheduler.add_job(
         symbol_master.run,
