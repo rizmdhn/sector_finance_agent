@@ -200,21 +200,26 @@ async def chat_completions(request: Request):
 
 
 def _build_agent_with_fallback(model_entry, *, user_id: str, session_id: str):
-    try:
-        return build_agent(
-            model_entry, db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id, registry=_registry
-        )
-    except Exception:
-        if not model_entry.fallback:
-            raise
-        return build_agent(
-            _registry[model_entry.fallback],
-            db=get_db(),
-            cache=get_cache(),
-            user_id=user_id,
-            session_id=session_id,
-            registry=_registry,
-        )
+    """Walks the FULL fallback chain, not just one hop — a single retry isn't
+    enough when a chain has more than one entry on the same now-unusable provider
+    (e.g. idx-analyst-claude-sonnet -> idx-analyst-claude, both Anthropic: if the
+    real failure is a missing/blank ANTHROPIC_API_KEY, that first fallback fails
+    for the identical reason, and only a second hop to a GPT entry actually
+    recovers). `seen` guards against a cycle in a hand-edited models.yaml turning
+    this into an infinite loop — fails loudly on a cycle rather than hanging.
+    """
+    seen: set[str] = set()
+    entry = model_entry
+    while True:
+        try:
+            return build_agent(
+                entry, db=get_db(), cache=get_cache(), user_id=user_id, session_id=session_id, registry=_registry
+            )
+        except Exception:
+            seen.add(entry.name)
+            if not entry.fallback or entry.fallback in seen:
+                raise
+            entry = _registry[entry.fallback]
 
 
 async def _run_to_completion(agent, messages: list[dict]) -> str:

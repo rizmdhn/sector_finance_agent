@@ -82,8 +82,28 @@ def select_for_tier(registry: dict[str, ModelEntry], tier: str, default: ModelEn
 
 
 def build_model(entry: ModelEntry) -> Model:
-    """Return a Strands model instance for this registry entry."""
-    api_key = os.environ[entry.key_ref]
+    """Return a Strands model instance for this registry entry.
+
+    Raises if `entry.key_ref` is unset OR set-but-blank (real live difference: a
+    blank ANTHROPIC_API_KEY="" in .env makes `os.environ[...]` succeed with "",
+    which is NOT the same failure as a missing key — `os.environ[entry.key_ref]`
+    alone only catches the latter). Checked here, not left to surface from the
+    provider SDK client, because BOTH anthropic.AsyncAnthropic(api_key="") and
+    OpenAI(api_key="") construct successfully with no error at all — confirmed
+    live, not assumed — the auth failure only happens on the first real network
+    call, deep inside streaming. That call site is NOT wrapped by gateway/main.py's
+    _build_agent_with_fallback (which only catches errors during THIS function/
+    build_agent(), not during actual inference), so a blank key silently defeated
+    every registry fallback chain (e.g. idx-analyst-claude -> idx-analyst-gpt) —
+    real bug, found live: a user with only OPENAI_API_KEY set still hit a gateway
+    error instead of automatically falling back to GPT, because nothing failed
+    until it was too late for _build_agent_with_fallback to catch it. Raising here
+    instead makes the failure happen at build time, inside the same try/except
+    that already knows how to retry with entry.fallback — no change needed there.
+    """
+    api_key = os.environ.get(entry.key_ref) or ""
+    if not api_key:
+        raise RuntimeError(f"{entry.key_ref} is not set — cannot build model {entry.name!r}")
 
     if entry.provider == "anthropic":
         from strands.models.anthropic import AnthropicModel
