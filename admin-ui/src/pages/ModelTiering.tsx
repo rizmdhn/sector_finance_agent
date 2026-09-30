@@ -17,7 +17,17 @@ function ResolvedModel({ choice, models }: { choice: string; models: ModelInfo[]
   const requested = isDirectPick ? models.find((m) => m.name === choice) : models.find((m) => m.tier === choice);
   const resolved = resolveChoice(choice, models);
 
-  if (requested?.usable) {
+  // "Live" means EXACTLY what you picked will run, no substitution — checked
+  // by name, not just `usable` (a real model_id): `usable` says nothing about
+  // whether that model's own API key is actually configured. Real bug found
+  // live (2026-09-30): this used to show a confident green "live" dot on
+  // idx-analyst-claude with only an OpenAI key set — the backend was already
+  // routing everything to GPT instead (gateway/registry.py's key-aware
+  // select_for_tier), so the UI was telling the user something different from
+  // what would actually answer their question.
+  const isLive = resolved.name === requested?.name && resolved.key_configured;
+
+  if (isLive) {
     return (
       <div className="resolved resolved--live">
         <span className="resolved-dot" />
@@ -25,11 +35,15 @@ function ResolvedModel({ choice, models }: { choice: string; models: ModelInfo[]
       </div>
     );
   }
+
+  const reason = !requested?.usable
+    ? `${choice} has no usable model registered`
+    : !requested.key_configured
+      ? `${requested.name}'s API key isn't configured on the gateway`
+      : `${choice} has no usable model`;
+
   return (
-    <div
-      className="resolved resolved--fallback"
-      title={`${choice} has no usable model — falls back to cheap`}
-    >
+    <div className="resolved resolved--fallback" title={reason}>
       <span className="resolved-dot" />
       <span>
         falls back to <span className="resolved-name">{resolved.name}</span>
@@ -186,10 +200,16 @@ export default function ModelTiering({ userId }: { userId: string }) {
                   <h3>{tier}</h3>
                   {modelsByTier[tier].length === 0 && <p className="empty-note">none</p>}
                   {modelsByTier[tier].map((model) => (
-                    <div key={model.name} className={`model-card ${model.usable ? "" : "model-card--placeholder"}`}>
+                    <div
+                      key={model.name}
+                      className={`model-card ${model.usable && model.key_configured ? "" : "model-card--placeholder"}`}
+                    >
                       <div className="model-card-name">{model.name}</div>
                       <div className="model-card-provider">{model.provider}</div>
                       {!model.usable && <div className="model-card-note">placeholder — not usable yet</div>}
+                      {model.usable && !model.key_configured && (
+                        <div className="model-card-note">no API key configured on the gateway</div>
+                      )}
                     </div>
                   ))}
                 </div>

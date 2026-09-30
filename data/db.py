@@ -85,6 +85,10 @@ class Database:
             ).fetchone()
             return row is not None
 
+    def has_symbol_master(self) -> bool:
+        with self._connect() as conn:
+            return conn.execute("SELECT 1 FROM symbol_master LIMIT 1").fetchone() is not None
+
     # -- Price store (INGEST) -------------------------------------------------
 
     def upsert_price_rows(self, rows: list[dict]) -> None:

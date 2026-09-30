@@ -43,6 +43,40 @@ export const ROLES: RoleInfo[] = [
   },
 ];
 
+// Every request in this app asks for this exact model at the top level
+// (src/api/chat.ts's CHAT_MODEL) — per-role tiering overrides FROM there, same
+// as gateway/registry.py::select_for_tier's `default` parameter. Hardcoded
+// here rather than threaded through as a prop because it's genuinely the same
+// constant on both sides of one hand-maintained contract, not a value that
+// varies per call site.
+const DEFAULT_MODEL_NAME = "idx-analyst-claude";
+
+/** Mirrors gateway/registry.py::select_for_tier exactly, including the
+ * 2026-09-30 key-awareness fix: a same-tier default with no configured key is
+ * skipped in favor of another tier match that actually has one, instead of
+ * being returned regardless. */
+function selectForTier(tier: string, models: ModelInfo[]): ModelInfo {
+  const default_ = models.find((m) => m.name === DEFAULT_MODEL_NAME)!;
+  if (default_.tier === tier && default_.key_configured) return default_;
+  const match = models.find((m) => m.tier === tier && m.usable && m.key_configured);
+  if (match) return match;
+  return default_;
+}
+
+/** Walks a model's registered `fallback` chain, mirroring gateway/main.py's
+ * _build_agent_with_fallback — an explicit by-name pick with no key isn't
+ * corrected by selectForTier (that only applies to tier choices), so without
+ * this the preview would show a model as "live" that will actually fail on
+ * the first try and only recover via this exact chain. `seen` guards a cycle
+ * the same way the backend does. */
+function walkFallback(entry: ModelInfo, models: ModelInfo[], seen = new Set<string>()): ModelInfo {
+  if (entry.key_configured || !entry.fallback || seen.has(entry.name)) return entry;
+  seen.add(entry.name);
+  const next = models.find((m) => m.name === entry.fallback);
+  if (!next) return entry;
+  return walkFallback(next, models, seen);
+}
+
 /** Mirrors gateway/roles/orchestrator.py's model_for(): a role's stored
  * `choice` is checked against real model names FIRST (a direct pick, e.g.
  * "idx-analyst-gpt" regardless of its tier), then falls back to tier
@@ -50,8 +84,8 @@ export const ROLES: RoleInfo[] = [
  * tier, or the cheap/default model if none exists for it). */
 export function resolveChoice(choice: string, models: ModelInfo[]): ModelInfo {
   const direct = models.find((model) => model.name === choice && model.usable);
-  if (direct) return direct;
-  const tierMatch = models.find((model) => model.tier === choice && model.usable);
+  if (direct) return walkFallback(direct, models);
+  const tierMatch = ["cheap", "standard", "strong"].includes(choice) ? selectForTier(choice, models) : undefined;
   if (tierMatch) return tierMatch;
   return models.find((model) => model.tier === "cheap")!;
 }

@@ -101,7 +101,10 @@ export default function Evals({ userId }: { userId: string }) {
       try {
         const [tiering, evalList] = await Promise.all([getModelTiering(userId), listEvalRuns()]);
         if (cancelled) return;
-        const usable = tiering.models.filter((m) => m.usable);
+        // key_configured too, not just usable — a model with a real model_id
+        // but no API key would fail as soon as it's picked as judge (same gap
+        // found live on the Model Tiering page, 2026-09-30).
+        const usable = tiering.models.filter((m) => m.usable && m.key_configured);
         setModels(usable);
         setJudgeModel((prev) => prev || usable[0]?.name || "");
         setRuns(evalList.data);

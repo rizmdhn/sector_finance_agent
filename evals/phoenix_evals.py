@@ -45,7 +45,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ.setdefault("PHOENIX_PROJECT_NAME", "idx-agent-evals")
+# Only set when run standalone (`python evals/phoenix_evals.py`) — this module is
+# also imported as a library by gateway/eval_runner.py, which runs in the SAME
+# process as the real chat gateway. Setting this unconditionally at import time
+# was a real live bug: gateway/main.py imports eval_runner before gateway.telemetry,
+# so gateway.telemetry.PROJECT_NAME (a module-level constant read from this exact
+# env var) picked up "idx-agent-evals" and every real chat trace landed in the
+# wrong Phoenix project.
+if __name__ == "__main__":
+    os.environ.setdefault("PHOENIX_PROJECT_NAME", "idx-agent-evals")
 
 from gateway.telemetry import setup_telemetry
 from phoenix.client import Client

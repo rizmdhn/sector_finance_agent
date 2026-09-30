@@ -56,7 +56,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ.setdefault("PHOENIX_PROJECT_NAME", "idx-agent-evals")
+# Only set when run standalone — see evals/phoenix_evals.py's matching comment:
+# setting this unconditionally at import time poisons gateway.telemetry.PROJECT_NAME
+# for any process that imports this module as a library instead of running it as a
+# script.
+if __name__ == "__main__":
+    os.environ.setdefault("PHOENIX_PROJECT_NAME", "idx-agent-evals")
 
 from gateway.telemetry import setup_telemetry
 from phoenix.client import Client

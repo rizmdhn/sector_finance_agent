@@ -24,7 +24,7 @@ from datetime import date, timedelta
 from data.cache import EPOCH_PRICE, Cache
 from data.canonical import idx_today
 from data.db import Database
-from data.sectors_client import SectorsClient
+from data.sectors_client import SectorsAPIError, SectorsClient
 
 # ponytail: no IDX trading-holiday calendar, so a weekday holiday in the backfill
 # window gets re-fetched (1 empty page, cheap) on every run forever, same ambiguity
@@ -48,7 +48,20 @@ def _fetch_close(client: SectorsClient, trade_date: date) -> list[dict]:
     rows = []
     offset = 0
     while True:
-        response = client.get_daily_universe_close(trade_date.isoformat(), offset=offset)
+        try:
+            response = client.get_daily_universe_close(trade_date.isoformat(), offset=offset)
+        except SectorsAPIError as exc:
+            # Real bug found live (2026-10-01): the API doesn't just return an
+            # empty result set for "not landed yet" — for `idx_today()` itself it
+            # can outright 400 with "Date cannot be in the future" (their server's
+            # own data-availability clock apparently lags Jakarta wall-clock by
+            # up to a day). Before this fix that 400 propagated uncaught, crashing
+            # the WHOLE job — including the scheduler's real production poll, not
+            # just a manual/backfill run. Treated identically to "not landed yet"
+            # (empty rows), matching the existing semantics for that case.
+            if "in the future" in str(exc).lower():
+                return []
+            raise
         page = response.get("results", [])
         rows.extend(page)
         pagination = response.get("pagination", {})
@@ -64,7 +77,15 @@ def run(db: Database, cache: Cache, client: SectorsClient, today: date | None = 
     if latest == today:
         return
 
-    start = (latest + timedelta(days=1)) if latest else today
+    # Real bug found live (2026-10-01), reproduced from a genuinely fresh/empty
+    # database: `latest` is None on a brand-new install, and `start = today` in
+    # that case meant the very first ingest run only ever attempted TODAY's
+    # date — which can itself get rejected as "in the future" (see _fetch_close)
+    # or just not be posted yet — leaving the database permanently empty with no
+    # error raised. An empty database gets the same MAX_BACKFILL_DAYS window as
+    # a long outage, not a narrower "just today" one; there's no meaningful
+    # difference between "never ingested" and "very out of date" here.
+    start = (latest + timedelta(days=1)) if latest else today - timedelta(days=MAX_BACKFILL_DAYS)
     if start < today - timedelta(days=MAX_BACKFILL_DAYS):
         start = today - timedelta(days=MAX_BACKFILL_DAYS)
 

@@ -10,6 +10,15 @@ export interface ModelInfo {
   tier: Tier;
   /** True once model_id is a real provider id, not models.yaml's "TODO" placeholder. */
   usable: boolean;
+  /** True if this model's provider API key is actually set (non-blank) on the
+   * gateway right now — independent of `usable`. A model can be `usable` (a
+   * real model_id) but have no key configured, e.g. only an OpenAI key set
+   * with Anthropic entries still registered. */
+  key_configured: boolean;
+  /** models.yaml's registered fallback name, or null — mirrors gateway/main.py's
+   * _build_agent_with_fallback chain, so an explicit no-key pick can be
+   * previewed accurately instead of shown as if it will just work. */
+  fallback: string | null;
 }
 
 export interface RoleInfo {

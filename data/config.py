@@ -16,9 +16,22 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             sectors_api_key=os.environ["SECTORS_API_KEY"],
-            sectors_api_base_url=os.environ.get(
-                "SECTORS_API_BASE_URL", "https://api.sectors.app"
-            ),
+            # `.get(key, default)` only falls back when the key is ABSENT, not when
+            # it's present-but-blank — `.env.example` ships SECTORS_API_BASE_URL=
+            # (blank, "everything else can stay as-is" per the README), so
+            # docker-compose's env_file sets it to "" in every container, and the
+            # intended default silently never applied. Real bug, reproduced from a
+            # genuinely fresh clone (2026-10-01): every Sectors API call failed with
+            # `httpx.UnsupportedProtocol: Request URL is missing an 'http://' or
+            # 'https://' protocol.` `or` (not `.get`'s default) is what actually
+            # falls through on blank.
+            # data/sectors_client.py's own _get() requires a trailing "/v2/" (a
+            # bare "/" here makes httpx resolve endpoint paths against the domain
+            # root and silently drop the version prefix — found live: the default
+            # below was originally just "https://api.sectors.app", which 404'd on
+            # every real call once SECTORS_API_BASE_URL's blank-default bug above
+            # was fixed and this one was finally reachable).
+            sectors_api_base_url=os.environ.get("SECTORS_API_BASE_URL") or "https://api.sectors.app/v2/",
             postgres_dsn=os.environ.get(
                 "POSTGRES_DSN",
                 "postgresql://{user}:{password}@{host}:{port}/{db}".format(

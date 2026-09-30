@@ -53,7 +53,7 @@ def load_registry(path: Path | str = DEFAULT_REGISTRY_PATH) -> dict[str, ModelEn
 PLACEHOLDER_MODEL_ID = "TODO"
 
 
-def _has_usable_key(entry: ModelEntry) -> bool:
+def has_usable_key(entry: ModelEntry) -> bool:
     """Same "set but blank counts as unusable" check as build_model()'s own —
     kept separate rather than calling build_model() itself here, since this only
     needs to know if it's WORTH trying, not build a real client (which has real
@@ -82,7 +82,7 @@ def select_for_tier(registry: dict[str, ModelEntry], tier: str, default: ModelEn
     matches what was requested, there's nothing to substitute.
 
     Both the short-circuit and the scan now additionally require a usable API key
-    (`_has_usable_key`) — a second real bug found live (2026-09-30): a brand-new
+    (`has_usable_key`) — a second real bug found live (2026-09-30): a brand-new
     admin-ui user who never visits Model Tiering runs on DEFAULT_ROLE_TIERS'
     plain "cheap" for every role, and `default` there is whatever the TOP-LEVEL
     request asked for (admin-ui's hardcoded chat default, `idx-analyst-claude`).
@@ -98,14 +98,14 @@ def select_for_tier(registry: dict[str, ModelEntry], tier: str, default: ModelEn
     not key-checked — an explicit pick is the user's own call to make), not the
     normal path for tier-only users anymore.
     """
-    if default.tier == tier and _has_usable_key(default):
+    if default.tier == tier and has_usable_key(default):
         return default
     for entry in registry.values():
         if (
             entry.tier == tier
             and entry.supports_tools
             and entry.model_id != PLACEHOLDER_MODEL_ID
-            and _has_usable_key(entry)
+            and has_usable_key(entry)
         ):
             return entry
     return default

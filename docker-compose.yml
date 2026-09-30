@@ -25,9 +25,12 @@ services:
       - VALKEY_HOST=valkey
       - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
     depends_on:
-      - valkey
-      - postgres
-      - phoenix
+      valkey:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
 
   admin-ui:
     build:
@@ -53,8 +56,10 @@ services:
       - POSTGRES_HOST=postgres
       - VALKEY_HOST=valkey
     depends_on:
-      - valkey
-      - postgres
+      valkey:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
   valkey:
     image: valkey/valkey:latest
@@ -77,6 +82,21 @@ services:
       # comment for why a fresh volume needs this but this session's existing one
       # didn't (had to be created by hand instead — PROGRESS.md item 33).
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    # Real bug found live (2026-10-01), reproduced from a genuinely fresh clone +
+    # fresh volumes: `depends_on: [postgres]` elsewhere only waited for this
+    # container to START, not for Postgres to actually accept connections —
+    # phoenix's migration step raced it and lost (`socket.gaierror` / connection
+    # refused during initdb), then got stuck in a half-migrated state that a
+    # plain restart could NOT self-heal (needs manual `alembic stamp` surgery —
+    # far beyond what a new user should ever have to do). `pg_isready` only
+    # succeeds once Postgres is truly ready, AFTER docker-entrypoint-initdb.d
+    # finishes — every `condition: service_healthy` dependency on this service
+    # now genuinely waits that out instead of racing it.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
 
   phoenix:
     image: arizephoenix/phoenix:latest
@@ -96,7 +116,8 @@ services:
       # exists instead of adding a second thing to keep backed up.
       - PHOENIX_SQL_DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/phoenix
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
       # Not the source of truth anymore (Postgres is, above) — kept as a home for
       # whatever non-relational state Phoenix's working dir still uses (wasm

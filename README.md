@@ -38,6 +38,7 @@ Fill in these values (everything else can stay as-is):
 | `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` | At least one LLM provider key |
 | `IDX_GATEWAY_KEY` | Make up any random password-like string, e.g. `my-secret-key-123` |
 | `ADMIN_PASSWORD` | The password you'll use to log into the admin panel |
+| `POSTGRES_PASSWORD` | Make up any random string, same as above — **required**, not optional: the Postgres container refuses to even start without it on a fresh volume |
 
 > **About `IDX_GATEWAY_KEY`:** this is a shared password the admin panel and the
 > backend use to talk to each other — think of it as an internal handshake, not

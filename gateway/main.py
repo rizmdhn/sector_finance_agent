@@ -21,7 +21,7 @@ from gateway.guardrails import (
     attach_disclaimer,
     enforce_rate_limit,
 )
-from gateway.registry import PLACEHOLDER_MODEL_ID, load_registry
+from gateway.registry import PLACEHOLDER_MODEL_ID, has_usable_key, load_registry
 from gateway.roles.orchestrator import DEFAULT_ROLE_TIERS, resolve_role_tiers
 from gateway.telemetry import setup_telemetry, traced_conversation
 from data.deps import get_cache, get_db
@@ -39,6 +39,31 @@ app = FastAPI(title="IDX Agent Gateway")
 _auth_scheme = HTTPBearer()
 
 _registry = load_registry()
+
+
+def _validate_startup_config() -> None:
+    """Fail fast with one clear message instead of a confusing KeyError/500 deep
+    in a request handler — the exact failure mode hit live (2026-10-01) on a fresh
+    clone missing SECTORS_API_KEY, and separately when no model provider key was
+    configured at all. Also applies data/schema.sql (idempotent, CREATE TABLE IF
+    NOT EXISTS throughout) so a fresh database doesn't need the README's manual
+    `init-db` step either.
+    """
+    missing = [key for key in ("SECTORS_API_KEY", "IDX_GATEWAY_KEY") if not os.environ.get(key)]
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variable(s): {', '.join(missing)}. "
+            "Set them in your .env file before starting the gateway."
+        )
+    if not any(has_usable_key(entry) for entry in _registry.values()):
+        raise RuntimeError(
+            "No usable model API key configured — set ANTHROPIC_API_KEY and/or "
+            "OPENAI_API_KEY in your .env file."
+        )
+    get_db().init_schema()
+
+
+_validate_startup_config()
 
 
 @app.on_event("shutdown")
@@ -372,6 +397,25 @@ class UpdateTierRequest(BaseModel):
     tier: str
 
 
+@app.get("/v1/admin/readiness", dependencies=[Depends(_check_auth)])
+def get_readiness() -> dict:
+    """Lets admin-ui gate the real UI behind a "still setting up" screen instead of
+    letting a user hit a confusing "unknown symbol" error on a fresh deploy whose
+    ingest-worker hasn't finished its one-time seed yet (ingest/scheduler.py
+    bootstraps symbol_master/universe_close automatically on an empty database,
+    but that first sweep still takes a few seconds to a few minutes)."""
+    db = get_db()
+    symbol_master_ready = db.has_symbol_master()
+    price_data_ready = db.latest_trade_date() is not None
+    model_key_ready = any(has_usable_key(entry) for entry in _registry.values())
+    return {
+        "ready": symbol_master_ready and price_data_ready and model_key_ready,
+        "symbol_master_ready": symbol_master_ready,
+        "price_data_ready": price_data_ready,
+        "model_key_ready": model_key_ready,
+    }
+
+
 @app.get("/v1/admin/model-tiers", dependencies=[Depends(_check_auth)])
 def get_model_tiers(user: str) -> dict:
     """The real thing admin-ui's Model Tiering page was a mock in front of (see
@@ -379,7 +423,18 @@ def get_model_tiers(user: str) -> dict:
     role->tier map (gateway/roles/orchestrator.py's DEFAULT_ROLE_TIERS with their
     role_tier_config overrides applied — every user picks their own tiering, same
     `user` scoping as /v1/memory), `models` is the real registry, not a
-    hand-copied list a UI has to keep in sync by hand."""
+    hand-copied list a UI has to keep in sync by hand.
+
+    `key_configured` added 2026-09-30 — real bug found live: the frontend's own
+    "resolved model" preview only checked `usable` (not a models.yaml placeholder),
+    with zero awareness of which provider actually has an API key set. It
+    confidently showed a green "live" dot on idx-analyst-claude with only an
+    OpenAI key configured — the backend (gateway/registry.py's select_for_tier,
+    has_usable_key) had already been fixed to route around that correctly, but
+    the UI kept claiming something different was about to run. This exposes the
+    same signal the backend actually uses, so the preview can finally tell the
+    truth instead of a plausible-looking guess.
+    """
     return {
         "config": resolve_role_tiers(get_db(), user),
         "models": [
@@ -388,6 +443,8 @@ def get_model_tiers(user: str) -> dict:
                 "provider": entry.provider,
                 "tier": entry.tier,
                 "usable": entry.model_id != PLACEHOLDER_MODEL_ID,
+                "key_configured": has_usable_key(entry),
+                "fallback": entry.fallback,
             }
             for entry in _registry.values()
         ],
