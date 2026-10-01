@@ -52,8 +52,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # so gateway.telemetry.PROJECT_NAME (a module-level constant read from this exact
 # env var) picked up "idx-agent-evals" and every real chat trace landed in the
 # wrong Phoenix project.
+EVAL_PROJECT_NAME = "idx-agent-evals"
+
 if __name__ == "__main__":
-    os.environ.setdefault("PHOENIX_PROJECT_NAME", "idx-agent-evals")
+    os.environ.setdefault("PHOENIX_PROJECT_NAME", EVAL_PROJECT_NAME)
 
 from gateway.telemetry import setup_telemetry
 from phoenix.client import Client

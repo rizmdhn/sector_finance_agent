@@ -38,17 +38,6 @@ from data.sectors_client import SectorsAPIError, SectorsClient
 # if a real outage ever needs more than 2 weeks of catch-up.
 MAX_BACKFILL_DAYS = 14
 
-# A fresh install's first ingest run used to backfill the full MAX_BACKFILL_DAYS
-# window (~10 weekdays x ~33 pages = ~330 calls) back-to-back with symbol_master's
-# own bootstrap sweep — real bug found live (2026-10-01): that burst tripped
-# Sectors' 429 rate limit, which (before data/sectors_client.py's SectorsRateLimitError
-# fix) crashed the whole ingest-worker before it ever reached scheduler.start(). Only
-# the latest couple of trading days are actually needed for the platform to be usable
-# (a ticker just needs SOME recent close to answer with) — the rest isn't required
-# for a first build, and the normal daily poll (16-19h WIB, below) naturally extends
-# history forward from here one day at a time.
-BOOTSTRAP_BACKFILL_DAYS = 2
-
 
 def _weekdays_between(start: date, end: date) -> list[date]:
     """Every Mon-Fri date in [start, end], inclusive."""
@@ -95,11 +84,13 @@ def run(
     # that case meant the very first ingest run only ever attempted TODAY's
     # date — which can itself get rejected as "in the future" (see _fetch_close)
     # or just not be posted yet — leaving the database permanently empty with no
-    # error raised. An empty database gets the same backfill window as a long
-    # outage (capped by `max_backfill_days` — the caller passes BOOTSTRAP_BACKFILL_DAYS
-    # for a fresh install, MAX_BACKFILL_DAYS otherwise), not a narrower "just today"
-    # one; there's no meaningful difference between "never ingested" and "very out
-    # of date" here.
+    # error raised. An empty database gets the same backfill window (capped by
+    # `max_backfill_days`) as a long outage, not a narrower "just today" one;
+    # there's no meaningful difference between "never ingested" and "very out of
+    # date" here. `max_backfill_days` defaults to MAX_BACKFILL_DAYS — pass a
+    # smaller value for an explicit lighter catch-up (e.g. from scripts/manage.py)
+    # when the full window's credit cost isn't wanted. ingest/scheduler.py's normal
+    # cron poll never needs this at all: it only ever asks for `latest+1` onward.
     start = (latest + timedelta(days=1)) if latest else today - timedelta(days=max_backfill_days)
     if start < today - timedelta(days=max_backfill_days):
         start = today - timedelta(days=max_backfill_days)

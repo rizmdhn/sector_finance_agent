@@ -35,7 +35,18 @@ ADMIN_SESSION_TTL_SECONDS = 7 * 24 * 3600
 
 setup_telemetry()
 
-app = FastAPI(title="IDX Agent Gateway")
+# Real bug found live (2026-10-01): a modern FastAPI (0.142+) auto-instruments
+# every HTTP request against the GLOBAL OTel tracer provider by default —
+# `tracing`/`operation_spans` default to True — with no opt-in call from this
+# codebase at all. Since gateway/telemetry.py's setup_telemetry() sets that same
+# global provider (for the real agent/chat spans we DO want), every endpoint —
+# including /v1/admin/readiness, which admin-ui polls every 5 seconds indefinitely
+# while any user is logged in — was landing in idx-agent-gateway as pure noise
+# alongside actual conversations. gateway/telemetry.py's own traced_conversation()
+# already provides the one span per real chat completion this project actually
+# wants; FastAPI's own automatic tracing is redundant on top of that and is
+# disabled here rather than routed elsewhere, since none of it is agent activity.
+app = FastAPI(title="IDX Agent Gateway", telemetry={"tracing": False})
 _auth_scheme = HTTPBearer()
 
 _registry = load_registry()

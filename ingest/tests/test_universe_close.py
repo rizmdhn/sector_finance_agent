@@ -3,7 +3,7 @@
 from datetime import date
 
 from data.sectors_client import SectorsAPIError, SectorsRateLimitError
-from ingest.jobs.universe_close import BOOTSTRAP_BACKFILL_DAYS, MAX_BACKFILL_DAYS, _weekdays_between, run
+from ingest.jobs.universe_close import MAX_BACKFILL_DAYS, _weekdays_between, run
 
 
 def test_weekdays_between_skips_weekend():
@@ -114,26 +114,30 @@ def test_run_caps_backfill_depth():
     assert len(calls) <= MAX_BACKFILL_DAYS + 1  # +1 for weekday/weekend rounding slack
 
 
-def test_run_honors_smaller_bootstrap_window_on_empty_database():
-    """Real bug found live (2026-10-01): a fresh install's first ingest run used
-    to backfill the full MAX_BACKFILL_DAYS window (~330 calls) in one burst
-    alongside symbol_master's own bootstrap sweep, tripping Sectors' 429 rate
-    limit. ingest/scheduler.py now passes BOOTSTRAP_BACKFILL_DAYS (much smaller)
-    for that one-time call — this checks `run` actually honors the override
-    rather than a smaller value silently being ignored."""
+def test_run_honors_smaller_max_backfill_days_override():
+    """`max_backfill_days` lets a caller ask for a lighter catch-up than the
+    MAX_BACKFILL_DAYS default (e.g. scripts/manage.py, to control credit cost
+    explicitly) — checks `run` actually honors the override rather than a smaller
+    value silently being ignored. ingest/scheduler.py's normal cron poll doesn't
+    need this at all (real cost feedback, 2026-10-01: an earlier version had it
+    eagerly bootstrap a couple of days of price history on every fresh install;
+    removed — price data isn't required for the platform to work, see
+    gateway/main.py's get_readiness(), so spending credits on it unprompted
+    fought this project's whole purpose of controlling Sectors credit spend)."""
     today = date(2026, 9, 29)
     db = _FakeDB(latest=None)
     cache = _FakeCache()
     client = _FakeClient(landed_dates=set())
+    small_window = 2
 
     calls = []
     real_get = client.get_daily_universe_close
     client.get_daily_universe_close = lambda trade_date, offset=0: (calls.append(trade_date), real_get(trade_date, offset))[1]
 
-    run(db, cache, client, today=today, max_backfill_days=BOOTSTRAP_BACKFILL_DAYS)
+    run(db, cache, client, today=today, max_backfill_days=small_window)
 
-    assert len(calls) <= BOOTSTRAP_BACKFILL_DAYS + 1
-    assert BOOTSTRAP_BACKFILL_DAYS < MAX_BACKFILL_DAYS
+    assert len(calls) <= small_window + 1
+    assert small_window < MAX_BACKFILL_DAYS
 
 
 def test_run_propagates_rate_limit_error_uncaught():

@@ -4,6 +4,7 @@ See idx_agent_infrastructure_diagrams_md.md section 7.
 """
 
 import logging
+import time
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -20,6 +21,33 @@ logger = logging.getLogger(__name__)
 
 TIMEZONE = "Asia/Jakarta"
 
+# Real gap found live (2026-10-01): a bootstrap job that hit a 429 was left to wait
+# for its NEXT NATURAL schedule (Monday 3am / the 16-19h WIB poll) before retrying —
+# on a fresh install that can be hours away, leaving admin-ui's "setting up" banner
+# stuck the whole time even though the miss was a one-off burst, not a real outage.
+# This is a one-time startup path, so a few short blocking retries here (not inside
+# the job functions themselves, which stay simple and are also reused by the normal
+# cron schedule) are worth it instead of waiting on the clock.
+BOOTSTRAP_RETRY_DELAYS_SECONDS = [15, 60, 180]
+
+
+def _run_bootstrap_job(name: str, job) -> None:
+    for attempt, delay in enumerate([0, *BOOTSTRAP_RETRY_DELAYS_SECONDS]):
+        if delay:
+            logger.warning("%s bootstrap hit Sectors' rate limit — retrying in %ss", name, delay)
+            time.sleep(delay)
+        try:
+            job()
+            return
+        except SectorsRateLimitError:
+            if attempt == len(BOOTSTRAP_RETRY_DELAYS_SECONDS):
+                logger.warning(
+                    "%s bootstrap still rate-limited after %d retries — will land on its "
+                    "next regular schedule instead of crashing the worker",
+                    name,
+                    len(BOOTSTRAP_RETRY_DELAYS_SECONDS),
+                )
+
 
 def build_scheduler() -> BlockingScheduler:
     scheduler = BlockingScheduler(timezone=TIMEZONE)
@@ -30,34 +58,21 @@ def build_scheduler() -> BlockingScheduler:
     # case where this worker starts before agent-gateway ever has.
     db.init_schema()
 
-    # symbol_master only otherwise runs Monday 3am WIB (below), and universe_close
-    # only polls 16-19h WIB (also below) — on a fresh database (new clone/pull,
-    # first `docker compose up`) that leaves every ticker lookup failing with
-    # "unknown symbol", or price data simply missing, until those windows hit,
-    # unless someone remembers the README's manual seed steps. Bootstrap both once
-    # at startup instead, same jobs, just automatic — trimmed to only what's
-    # essential for a first chat message to work (symbol_master.run_essential,
-    # universe_close's BOOTSTRAP_BACKFILL_DAYS) rather than the full weekly/outage
-    # scope, and each wrapped separately so a 429 partway through one doesn't take
-    # the other down too. symbol_master must land first — universe_close's rows
-    # key off it existing. The full REFERENCE_LISTS sweep and the rest of
-    # MAX_BACKFILL_DAYS' price history still land on their normal schedule below.
+    # symbol_master only otherwise runs Monday 3am WIB (below) — on a fresh database
+    # (new clone/pull, first `docker compose up`) that leaves every ticker lookup
+    # failing with "unknown symbol" until then. This is the one genuinely essential
+    # bootstrap call: ~10 calls (one screener sweep), and nothing works without it.
+    #
+    # universe_close is deliberately NOT bootstrapped eagerly here anymore (it used
+    # to be, for up to ~99 extra calls on a fresh install) — real cost feedback
+    # (2026-10-01): this project exists specifically to control Sectors credit
+    # spend, and price data was already confirmed non-essential (every price-
+    # dependent tool degrades to UNAVAILABLE gracefully, see gateway/main.py's
+    # get_readiness() docstring) — spending a large burst on it at every fresh boot
+    # fights the project's own purpose for a feature nothing actually blocks on. It
+    # arrives for free on the very next normal 16-19h WIB poll below instead.
     if not db.has_symbol_master():
-        try:
-            symbol_master.run_essential(db, client)
-        except SectorsRateLimitError:
-            logger.warning(
-                "symbol_master bootstrap hit Sectors' rate limit — will retry on the "
-                "next scheduled run (Monday 3am WIB) instead of crashing the worker"
-            )
-    if db.latest_trade_date() is None:
-        try:
-            universe_close.run(db, cache, client, max_backfill_days=universe_close.BOOTSTRAP_BACKFILL_DAYS)
-        except SectorsRateLimitError:
-            logger.warning(
-                "universe_close bootstrap hit Sectors' rate limit — will retry on the "
-                "next scheduled poll (16-19h WIB) instead of crashing the worker"
-            )
+        _run_bootstrap_job("symbol_master", lambda: symbol_master.run_essential(db, client))
 
     scheduler.add_job(
         symbol_master.run,

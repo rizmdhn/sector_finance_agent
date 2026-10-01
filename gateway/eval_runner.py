@@ -11,8 +11,10 @@ progress bar and the run survives the requesting tab being closed.
 import logging
 import os
 
+from openinference.instrumentation import dangerously_using_project
+
 from data.db import Database
-from evals.phoenix_evals import CLASSIFIERS, DEFAULT_PROJECT, DEFAULT_PHOENIX_URL, _load_conversations
+from evals.phoenix_evals import CLASSIFIERS, DEFAULT_PROJECT, EVAL_PROJECT_NAME, DEFAULT_PHOENIX_URL, _load_conversations
 from phoenix.evals import LLM, create_classifier
 
 logger = logging.getLogger(__name__)
@@ -47,27 +49,39 @@ def run_eval(db: Database, run_id: int, judge_provider: str, judge_model: str, l
         annotations = []
         completed = 0
         cancelled = False
-        for _, row in df.iterrows():
-            for name, evaluator in evaluators.items():
-                for score in evaluator.evaluate({"output": row["output"]}):
-                    tallies[name][score.label] = tallies[name].get(score.label, 0) + 1
-                    annotations.append(
-                        {
-                            "name": name,
-                            "annotator_kind": "LLM",
-                            "span_id": row["context.span_id"],
-                            "result": {"label": score.label, "score": score.score, "explanation": score.explanation},
-                        }
-                    )
-            completed += 1
-            db.progress_eval_run(run_id, completed)
+        # Judge calls made here are grading already-recorded conversations, not part
+        # of any live one themselves — real gap found live (2026-10-01): the global
+        # AnthropicInstrumentor/OpenAIInstrumentor (gateway/telemetry.py) patch the
+        # SDK clients process-wide, so every real LLM call, including these, traced
+        # into whatever project the gateway's own conversations use, burying real
+        # agent traceability under eval noise. `dangerously_using_project` (its own
+        # name's caution is about resource mutation in general — scoped narrowly to
+        # just this judge loop, it's the documented way to do exactly this) routes
+        # these into the same separate idx-agent-evals project the standalone
+        # evals/phoenix_evals.py script already uses, without touching the global
+        # tracer config real chat traces depend on.
+        with dangerously_using_project(EVAL_PROJECT_NAME):
+            for _, row in df.iterrows():
+                for name, evaluator in evaluators.items():
+                    for score in evaluator.evaluate({"output": row["output"]}):
+                        tallies[name][score.label] = tallies[name].get(score.label, 0) + 1
+                        annotations.append(
+                            {
+                                "name": name,
+                                "annotator_kind": "LLM",
+                                "span_id": row["context.span_id"],
+                                "result": {"label": score.label, "score": score.score, "explanation": score.explanation},
+                            }
+                        )
+                completed += 1
+                db.progress_eval_run(run_id, completed)
 
-            # Checked once per conversation, not per judge call — a run can only
-            # stop between conversations, not mid-flight on an LLM call already
-            # sent (see cancel_eval_run's docstring for why).
-            if db.is_eval_run_cancelled(run_id):
-                cancelled = True
-                break
+                # Checked once per conversation, not per judge call — a run can only
+                # stop between conversations, not mid-flight on an LLM call already
+                # sent (see cancel_eval_run's docstring for why).
+                if db.is_eval_run_cancelled(run_id):
+                    cancelled = True
+                    break
 
         if annotations:
             client.spans.log_span_annotations(span_annotations=annotations)

@@ -6,5 +6,6 @@ openai
 pyyaml
 opentelemetry-exporter-otlp-proto-http
 openinference-semantic-conventions
+openinference-instrumentation
 openinference-instrumentation-anthropic
 openinference-instrumentation-openai

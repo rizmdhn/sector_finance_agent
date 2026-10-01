@@ -136,8 +136,9 @@ export default function App() {
     <div className="shell">
       {!readiness.price_data_ready && (
         <div className="price-data-banner">
-          Recent price history is still loading in the background — portfolio, liquidity and returns figures will
-          show as unavailable until it lands (usually within a few minutes).
+          Recent price history hasn't landed yet — it's pulled once a day after market close (~16:00-19:00 WIB), not
+          eagerly on startup, to keep Sectors API credit usage minimal. Portfolio, liquidity and returns figures will
+          show as unavailable until then; everything else (company reports, ownership, fundamentals) works now.
         </div>
       )}
       <nav className="top-nav">
