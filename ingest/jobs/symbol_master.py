@@ -10,6 +10,7 @@ that's resolved.
 """
 
 from data.cache import Cache
+from data.canonical import cache_key
 from data.db import Database
 from data.sectors_client import SectorsClient
 
@@ -19,7 +20,15 @@ SCREENER_PAGE_SIZE = 200
 # force them into each row's `query_values` — confirmed live: `include_query_values`
 # only returns fields actually referenced in `where`/`order_by`, not a full field
 # dump, so a bare sweep with no `where` would come back with just symbol/company_name.
-_CATEGORY_FIELDS_WHERE = "sector!='' and sub_sector!='' and industry!='' and sub_industry!=''"
+#
+# `(indices in ['lq45'] or sector!='')` does the same for `indices`: always true given
+# the sector clause, so the row set is unchanged (962), but it makes every row carry
+# its index list (empty for non-members). Confirmed live 2026-10-03 — this is how
+# index membership arrives with the sweep at no extra call.
+_CATEGORY_FIELDS_WHERE = (
+    "sector!='' and sub_sector!='' and industry!='' and sub_industry!='' "
+    "and (indices in ['lq45'] or sector!='')"
+)
 
 REFERENCE_LISTS = {
     "subsectors": lambda client: client.get_subsectors(),
@@ -46,18 +55,38 @@ def _row_to_symbol_master(row: dict) -> dict:
         # TODO: no confirmed field name for listing date via the screener; leaving
         # unset until that's found (not blocking — nothing depends on it yet).
         "listing_date": None,
+        # lowercase slugs, [] (not NULL) for "no index" — NULL means never loaded
+        "indices": [i.lower() for i in values.get("indices") or []],
     }
 
 
-def sweep_symbol_master(client: SectorsClient) -> list[dict]:
+# Long enough to cover a 429-retry loop or a crash-restart loop of the worker, short
+# enough that a deliberate weekly refresh never reads stale pages.
+SWEEP_PAGE_TTL_SECONDS = 60 * 60
+
+
+def sweep_symbol_master(client: SectorsClient, cache: Cache | None = None) -> list[dict]:
     """One sweep of the screener with limit=200, paging via the response's own
-    `pagination.has_next`/`next_offset` (confirmed live, see data/sectors_client.py)."""
+    `pagination.has_next`/`next_offset` (confirmed live, see data/sectors_client.py).
+
+    Each page is memoized in `cache` (when given) the moment it's paid for. The sweep
+    only writes to Postgres once ALL pages are in, so a 429 on page 4 used to throw
+    away pages 1-3 — and every retry (or worker restart) re-bought them from page 1.
+    Real credit drain found on a fresh second machine (2026-10-03): credits spent,
+    nothing persisted. With the memo, a retry only pays for the page that failed."""
     rows: list[dict] = []
     offset = 0
     while True:
-        response = client.get_screener(
-            where=_CATEGORY_FIELDS_WHERE, order_by="symbol", limit=SCREENER_PAGE_SIZE, offset=offset
+        key = cache_key(
+            "symbol_master_sweep", {"where": _CATEGORY_FIELDS_WHERE, "offset": offset, "limit": SCREENER_PAGE_SIZE}
         )
+        response = cache.get(key) if cache is not None else None
+        if response is None:
+            response = client.get_screener(
+                where=_CATEGORY_FIELDS_WHERE, order_by="symbol", limit=SCREENER_PAGE_SIZE, offset=offset
+            )
+            if cache is not None:
+                cache.set(key, response, ttl=SWEEP_PAGE_TTL_SECONDS)
         rows.extend(response.get("results", []))
         pagination = response.get("pagination", {})
         if not pagination.get("has_next"):
@@ -66,7 +95,7 @@ def sweep_symbol_master(client: SectorsClient) -> list[dict]:
     return rows
 
 
-def run_essential(db: Database, client: SectorsClient) -> None:
+def run_essential(db: Database, client: SectorsClient, cache: Cache | None = None) -> int:
     """Just the symbol master sweep — what `data/repositories.py::ensure_valid_symbol`
     actually needs to stop rejecting every ticker as "unknown". Used for a fresh
     install's first-boot bootstrap (ingest/scheduler.py): the full `run()` below adds
@@ -74,13 +103,20 @@ def run_essential(db: Database, client: SectorsClient) -> None:
     screener filters and liquidity capacity — real features, but not required for a
     first chat message to work, and every extra call on that first burst is extra risk
     of the 429 found live (2026-10-01) combined with universe_close's own backfill
-    burst. Those lists still land on the normal Monday 3am sweep via `run()`."""
-    rows = sweep_symbol_master(client)
+    burst. Those lists still land on the normal Monday 3am sweep via `run()`.
+
+    Returns the number of symbols written. Raises if the sweep came back empty: an
+    API that answers 200 with zero rows used to "succeed" here having written nothing,
+    which is indistinguishable from a persistence bug without this check."""
+    rows = sweep_symbol_master(client, cache)
+    if not rows:
+        raise RuntimeError("symbol_master sweep returned 0 rows — nothing was written to Postgres")
     db.upsert_symbol_master([_row_to_symbol_master(r) for r in rows])
+    return len(rows)
 
 
 def run(db: Database, cache: Cache, client: SectorsClient) -> None:
     for name, fetch in REFERENCE_LISTS.items():
         db.upsert_reference_list(name, fetch(client))
 
-    run_essential(db, client)
+    run_essential(db, client, cache)

@@ -30,9 +30,11 @@ assumes — see PROGRESS.md for the verification transcript.
 """
 
 import contextlib
+import functools
 import logging
 import os
 
+from openinference.instrumentation.strands_agents import StrandsAgentsToOpenInferenceProcessor
 from openinference.semconv.resource import ResourceAttributes
 from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
 from opentelemetry import trace
@@ -85,6 +87,14 @@ def setup_telemetry() -> None:
     # relying on that side effect.
     trace.set_tracer_provider(provider)
 
+    # Strands emits OTel GenAI-convention spans (`gen_ai.*`), which Phoenix shows as
+    # unclassified boxes — no agent/tool/LLM kind, no readable input/output, so it was
+    # hard to tell when an agent or tool was actually called. This processor rewrites
+    # them in place to OpenInference (AGENT / TOOL / LLM kinds, tool name + arguments +
+    # result, token counts). It mutates spans on end, so it MUST be added before the
+    # exporter below or the exporter ships the untranslated spans.
+    provider.add_span_processor(_StrandsSpanConverter())
+
     telemetry = StrandsTelemetry(tracer_provider=provider)
     telemetry.setup_otlp_exporter(endpoint=traces_endpoint)
     if os.environ.get("OTEL_CONSOLE_EXPORT", "").lower() in ("1", "true"):
@@ -118,6 +128,46 @@ def setup_telemetry() -> None:
     logger.info("tracing configured: exporting to %s, project=%s", traces_endpoint, PROJECT_NAME)
 
 
+@functools.cache
+def _specialist_names() -> frozenset[str]:
+    # Lazy: gateway.roles pulls in every tool/data dependency, which standalone
+    # callers of this module (evals/phoenix_evals.py) shouldn't pay for at import.
+    from gateway.roles.orchestrator import DEFAULT_ROLE_TIERS
+
+    return frozenset(DEFAULT_ROLE_TIERS) - {"chief"}
+
+
+class _StrandsSpanConverter(StrandsAgentsToOpenInferenceProcessor):
+    """The stock converter marks Strands' own `chat` span as an LLM span, but the
+    Anthropic/OpenAI instrumentors below already emit a real LLM span for the same
+    call as its child (it carries `llm.provider`, which Phoenix needs to price the
+    call). Confirmed live: both spans carried identical token counts, so Phoenix
+    counted every model call's tokens and cost twice. Keep Strands' span as the
+    structural parent (CHAIN) and let the SDK span be the one LLM span per call."""
+
+    def on_end(self, span) -> None:
+        super().on_end(span)
+        attrs = span._attributes or {}
+        # A specialist reaches the Chief via `.as_tool()`, so Strands emits its
+        # delegation as a plain TOOL span. Label those AGENT so a delegation reads
+        # differently from a real data tool (get_price_history etc.) in Phoenix.
+        if (
+            attrs.get(SpanAttributes.OPENINFERENCE_SPAN_KIND) == OpenInferenceSpanKindValues.TOOL.value
+            and attrs.get(SpanAttributes.TOOL_NAME) in _specialist_names()
+        ):
+            span._attributes = attrs = {
+                **attrs,
+                SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.AGENT.value,
+            }
+        # Only Strands' own span (it keeps its original gen_ai.system="strands-agents") —
+        # this processor sees every span, including the SDK instrumentors' real LLM span.
+        if (
+            attrs.get("gen_ai.system") == "strands-agents"
+            and attrs.get(SpanAttributes.OPENINFERENCE_SPAN_KIND) == OpenInferenceSpanKindValues.LLM.value
+        ):
+            span._attributes = {**attrs, SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.CHAIN.value}
+
+
 class _ConversationSpan:
     def __init__(self, span):
         self._span = span
@@ -127,7 +177,7 @@ class _ConversationSpan:
 
 
 @contextlib.contextmanager
-def traced_conversation(question: str, model_name: str, user_id: str):
+def traced_conversation(question: str, model_name: str, user_id: str, session_id: str):
     """Wrap one gateway request in a span with OpenInference input/output
     attributes, so `evals/phoenix_evals.py` has one predictable row per
     conversation turn regardless of how many tool calls or sub-agent delegations
@@ -142,5 +192,8 @@ def traced_conversation(question: str, model_name: str, user_id: str):
         span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.AGENT.value)
         span.set_attribute(SpanAttributes.INPUT_VALUE, question)
         span.set_attribute("gen_ai.request.model", model_name)
-        span.set_attribute("user.id", user_id)
+        span.set_attribute(SpanAttributes.USER_ID, user_id)
+        # Phoenix's Sessions tab groups traces by this attribute — without it every
+        # turn of a multi-turn chat shows up as an unrelated trace.
+        span.set_attribute(SpanAttributes.SESSION_ID, session_id)
         yield _ConversationSpan(span)

@@ -37,3 +37,20 @@ def test_gives_up_after_exhausting_retries_without_raising(monkeypatch):
         raise SectorsRateLimitError(429, "rate limited")
 
     _run_bootstrap_job("test", always_limited)  # must not raise
+
+
+def test_non_rate_limit_failure_is_logged_not_retried_or_raised(monkeypatch):
+    """An empty sweep (or a DB error) won't fix itself on retry, and raising would
+    crash-loop the worker — bootstrap logs it and moves on."""
+    slept = []
+    monkeypatch.setattr("ingest.scheduler.time.sleep", lambda s: slept.append(s))
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("symbol_master sweep returned 0 rows")
+
+    _run_bootstrap_job("test", boom)  # must not raise
+
+    assert calls == [1]
+    assert slept == []

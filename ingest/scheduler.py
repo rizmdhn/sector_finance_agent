@@ -47,6 +47,26 @@ def _run_bootstrap_job(name: str, job) -> None:
                     name,
                     len(BOOTSTRAP_RETRY_DELAYS_SECONDS),
                 )
+        except Exception:
+            # Not a rate limit (e.g. an empty sweep, a DB error): retrying won't help
+            # and crashing the worker would just restart-loop it. Log the traceback
+            # and carry on — _verify_landed() below reports the resulting state.
+            logger.exception("%s bootstrap failed", name)
+            return
+
+
+def _verify_landed(db) -> None:
+    """Confirms the bootstrap actually left rows in Postgres, instead of trusting that
+    "no exception" means "data persisted" — found live on a second machine: credits
+    spent, ticker list never appeared."""
+    counts = db.table_counts()
+    if counts["symbol_master"]:
+        logger.info("symbol_master bootstrap OK — Postgres now holds %d symbols", counts["symbol_master"])
+    else:
+        logger.error(
+            "symbol_master bootstrap finished but Postgres holds 0 symbols — check the log "
+            "above, then run `docker compose exec ingest-worker python -m ingest.cli status`"
+        )
 
 
 def build_scheduler() -> BlockingScheduler:
@@ -72,7 +92,8 @@ def build_scheduler() -> BlockingScheduler:
     # fights the project's own purpose for a feature nothing actually blocks on. It
     # arrives for free on the very next normal 16-19h WIB poll below instead.
     if not db.has_symbol_master():
-        _run_bootstrap_job("symbol_master", lambda: symbol_master.run_essential(db, client))
+        _run_bootstrap_job("symbol_master", lambda: symbol_master.run_essential(db, client, cache))
+        _verify_landed(db)
 
     scheduler.add_job(
         symbol_master.run,
@@ -94,4 +115,5 @@ def build_scheduler() -> BlockingScheduler:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     build_scheduler().start()

@@ -24,6 +24,9 @@ from data.sectors_client import SectorsClient
 # peer multiples); financials/dividend/management/ownership change on a filing/
 # reporting cadence, so they key off the symbol version instead of price_epoch.
 PRICE_LINKED_REPORT_SECTIONS = {"overview", "valuation", "peers"}
+COMPANY_REPORT_SECTIONS = (
+    "overview", "valuation", "future", "peers", "financials", "dividend", "management", "ownership",
+)
 
 ANNUAL_FIELD_TTL_SECONDS = 24 * 60 * 60
 STATIC_FIELD_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -52,6 +55,17 @@ def ensure_valid_symbol(db: Database, symbol: str) -> str:
 def get_company_report(
     cache: Cache, db: Database, client: SectorsClient, symbol: str, sections: list[str]
 ) -> dict:
+    # Before any API call: the API 400s on an unknown section (found live — an agent
+    # asked for cash_flow/balance_sheet/risk, none of which exist; cash flow and
+    # balance sheet lines are inside `financials`). The message names the valid ones
+    # so the model's retry can succeed.
+    unknown = [name for name in sections if name not in COMPANY_REPORT_SECTIONS]
+    if unknown:
+        raise ValueError(
+            f"unknown company report section(s): {', '.join(unknown)}. "
+            f"Valid sections: {', '.join(COMPANY_REPORT_SECTIONS)}. "
+            "Cash flow and balance sheet figures are inside `financials`."
+        )
     symbol = ensure_valid_symbol(db, symbol)
 
     section_keys: dict[str, str] = {}
@@ -182,6 +196,20 @@ def screen_companies(
                 cache.set(key, rows, ttl=ttl)
 
     return rows[offset : offset + limit]
+
+
+def get_index_constituents(db: Database, index: str) -> list[dict]:
+    """Current members of one index ("lq45", "idx30", ...) as [{symbol, name}], read
+    from symbol_master.indices — which the weekly ticker sweep fills for every index at
+    once, so this never calls Sectors and costs no credit. An unknown index name just
+    has no members."""
+    members = db.get_index_members(index.strip().lower())
+    if members is None:
+        raise RuntimeError(
+            "index membership hasn't been loaded yet — it arrives with the ticker sweep "
+            "(`python -m ingest.cli seed`, or the weekly Monday run)"
+        )
+    return members
 
 
 # -- Price history: INGEST-served, read straight from the price store --------

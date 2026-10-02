@@ -9,3 +9,4 @@ openinference-semantic-conventions
 openinference-instrumentation
 openinference-instrumentation-anthropic
 openinference-instrumentation-openai
+openinference-instrumentation-strands-agents

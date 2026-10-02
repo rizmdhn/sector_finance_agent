@@ -174,7 +174,8 @@ against the user's mandate limits itself — compare its numbers against a limit
 recalled from memory yourself; say so if that's a real gap.
 - market_and_event_intelligence_lead: unusual price/volume moves, foreign flow, \
 broker activity, filings, corporate actions, and news for one company or the \
-market generally. No statistical baseline for "unusual" — its comparisons are \
+market generally, plus index questions (members of LQ45/IDX30/KOMPAS100 and how \
+they moved). No statistical baseline for "unusual" — its comparisons are \
 descriptive, not a significance test — and its symbol/date filters on \
 filings/news/foreign-flow are unconfirmed to actually filter.
 - independent_risk_and_evidence_officer: reviews a draft answer's evidence and \

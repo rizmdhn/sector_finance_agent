@@ -48,6 +48,7 @@ from gateway.tools.market_intelligence import (
     get_suspensions,
     get_top_brokers_daily,
 )
+from gateway.tools.index_analysis import analyze_index
 from gateway.tools.price_history import get_price_history
 
 # Guardrail against a runaway loop burning credit with no cap — see
@@ -61,7 +62,8 @@ NAME = "market_and_event_intelligence_lead"
 DESCRIPTION = (
     "Market and Event Intelligence Lead: unusual price/volume moves, foreign flow, "
     "broker activity/rankings, filings, corporate events, a market-wide corporate "
-    "actions calendar, and current stock suspensions — for one IDX-listed company "
+    "actions calendar, current stock suspensions, and what is inside an index "
+    "(LQ45, IDX30, ...) and how its members moved — for one IDX-listed company "
     "or the market generally. Give it a symbol (or omit for market-wide) and the "
     "specific question — it does not assess company fundamentals, valuation, or "
     "portfolio-level risk."
@@ -86,6 +88,16 @@ move in plain terms, never assert a significance figure you can't actually compu
 scoped to one symbol. `get_corporate_actions_calendar` is the market-wide version \
 (date window across ALL symbols) — use it for "what's coming up," not \
 `get_corporate_actions` repeated per symbol.
+- Index questions ("which companies are in LQ45", "what happened inside IDX30 \
+this month"): `analyze_index` returns the members, advancers/decliners, top \
+gainers/losers and an equal-weighted average return. Report its `window` — if it \
+is shorter than the period asked for, say so. Its average is NOT the official \
+index level and members are the current constituents; state both limits. To \
+explain a mover, follow up with `get_news`/`get_filings`/`get_foreign_flow` on \
+that symbol and label the link as a hypothesis. Name a sector only from the \
+`sector` / `by_sector` fields it returns — never infer a company's sector or \
+industry from its name or ticker (a retailer is not a commodity name because its \
+move looks like one).
 - Suspensions and broker rankings: `get_suspensions` (currently/recently \
 suspended, with reason), `get_top_brokers_daily` (top brokers by gross trading \
 value for a day, foreign gross/net per broker).
@@ -118,6 +130,7 @@ returning nothing → say so, don't describe "no notable activity" as a finding.
 
 TOOLS = [
     get_price_history,
+    analyze_index,
     get_corporate_actions,
     get_corporate_actions_calendar,
     get_filings,

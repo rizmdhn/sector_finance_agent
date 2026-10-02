@@ -59,9 +59,9 @@ class Database:
                 conn,
                 """
                 INSERT INTO symbol_master
-                    (symbol, name, sector, subsector, industry, subindustry, listing_date, updated_at)
+                    (symbol, name, sector, subsector, industry, subindustry, listing_date, indices, updated_at)
                 VALUES (%(symbol)s, %(name)s, %(sector)s, %(subsector)s, %(industry)s,
-                        %(subindustry)s, %(listing_date)s, now())
+                        %(subindustry)s, %(listing_date)s, %(indices)s::text[], now())
                 ON CONFLICT (symbol) DO UPDATE SET
                     name = EXCLUDED.name,
                     sector = EXCLUDED.sector,
@@ -69,6 +69,7 @@ class Database:
                     industry = EXCLUDED.industry,
                     subindustry = EXCLUDED.subindustry,
                     listing_date = EXCLUDED.listing_date,
+                    indices = EXCLUDED.indices,
                     updated_at = now()
                 """,
                 rows,
@@ -85,9 +86,31 @@ class Database:
             ).fetchone()
             return row is not None
 
+    def get_index_members(self, index_code: str) -> list[dict] | None:
+        """[{symbol, name}] for one index, or None if no ticker has had its `indices`
+        loaded yet (so "not loaded" can't be mistaken for "index has no members")."""
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM symbol_master WHERE indices IS NOT NULL LIMIT 1").fetchone() is None:
+                return None
+            return conn.execute(
+                "SELECT symbol, name FROM symbol_master WHERE %s = ANY(indices) ORDER BY symbol", (index_code,)
+            ).fetchall()
+
     def has_symbol_master(self) -> bool:
         with self._connect() as conn:
             return conn.execute("SELECT 1 FROM symbol_master LIMIT 1").fetchone() is not None
+
+    # Fixed allowlist, never caller-supplied — table names can't be bound as params.
+    _COUNTED_TABLES = ("symbol_master", "price_daily", "reference_lists")
+
+    def table_counts(self) -> dict[str, int]:
+        """Row counts of the ingested tables — a zero-credit way to confirm data
+        actually landed in Postgres (scripts/manage.py status, ingest/scheduler.py)."""
+        with self._connect() as conn:
+            return {
+                table: conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
+                for table in self._COUNTED_TABLES
+            }
 
     # -- Price store (INGEST) -------------------------------------------------
 

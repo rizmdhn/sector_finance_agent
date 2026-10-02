@@ -69,36 +69,38 @@ docker compose exec agent-gateway python -c "from data.deps import get_db; get_d
 the `ADMIN_PASSWORD` you set in step 1. That's it — chat, memory, model settings,
 and evals are all in there.
 
-**Step 5 — load market data, once.** The ingest worker only runs on a schedule
-(symbol list weekly, prices in a daily post-close window) — right after step 2 it
-hasn't fired yet, so chat questions about real tickers will come back empty. Seed
-it manually so data shows up immediately instead of waiting for the next scheduled
-run:
+**Step 5 — check the ticker list landed (automatic, ~5 Sectors credits).** On a
+fresh database the ingest worker fetches the ticker list by itself at startup; the
+admin UI shows a "Setting up your data" screen until it's in. Confirm it landed in
+Postgres — this costs **zero** credits:
 
 ```bash
-docker compose exec ingest-worker python -c "
-from data.deps import get_db, get_cache, get_client
-from ingest.jobs import symbol_master, universe_close
-db, cache, client = get_db(), get_cache(), get_client()
-symbol_master.run(db, cache, client)   # symbol list — must run first
-universe_close.run(db, cache, client)  # today's close prices
-print('seeded')
-"
+docker compose exec ingest-worker python -m ingest.cli status
 ```
 
-`symbol_master` must run before `universe_close` — prices get validated against
-the symbol list it builds. This costs real Sectors credit (~33 credits for the
-whole-market close pull — see [Credit cost per ticker](#credit-cost-per-ticker)
-below); it only needs to run once, not on every restart. `universe_close` pages through ~33 calls in one go — on a fresh/low-tier Sectors
-plan you may see a real `429 Too Many Requests` partway through (confirmed live);
-that's Sectors' own rate limit, not a bug. `symbol_master` isn't idempotent-cheap
-(it re-fetches everything, real credit, every call) — once it's succeeded once,
-wait a bit and retry with just the `universe_close` half:
+You want `symbol_master` to show ~960 rows and `BBCA.JK valid  True`. If it shows
+`0 rows` (the worker log says why — usually a Sectors `429` rate limit), trigger it
+again by hand:
+
+```bash
+docker compose exec ingest-worker python -m ingest.cli seed
+```
+
+`seed` is safe to repeat: every page it already paid for is remembered for an hour,
+so a retry after a `429` only buys the page that failed, never the whole list again.
+Wait a minute between attempts if Sectors is rate-limiting you.
+
+Prices are **not** fetched at startup (that was the expensive part, ~33 credits per
+trading day). They arrive on their own from the daily post-close poll
+(~16:00-19:00 WIB); until then price-based figures show as unavailable and
+everything else works. Only run a manual price pull if you need it today (it
+tries yesterday and today, ~33 credits per day that has data):
+
 ```bash
 docker compose exec ingest-worker python -c "
 from data.deps import get_db, get_cache, get_client
 from ingest.jobs import universe_close
-universe_close.run(get_db(), get_cache(), get_client())
+universe_close.run(get_db(), get_cache(), get_client(), max_backfill_days=1)
 print('seeded')
 "
 ```
@@ -200,7 +202,7 @@ system prompts say so explicitly rather than fabricating coverage.
 | **Chief Portfolio Intelligence Orchestrator** | none (delegates + memory) | Decides which specialist(s) a question needs, synthesizes findings, preserves hedges rather than tightening them into settled fact | — |
 | **Investment Research Lead** (`gateway/roles/investment_research.py`) | `get_company_report`, `get_price_history`, `analyze_fundamentals`, `analyze_ownership`, `screen_companies` | Company economics, financial quality, valuation, ownership composition (local/foreign holder split, free float %) for one company at a time | Named major shareholders or a controlling-group mapping (no data source has this — see G1 below); thesis monitoring against a recorded thesis |
 | **Portfolio Risk Lead** (`gateway/roles/portfolio_risk.py`) | `analyze_portfolio`, `analyze_liquidity` (optionally with free-float capacity), `analyze_returns` (Postgres-only + one 1-credit-then-free lookup for free-float capacity) | Exposure/concentration, single-position exit liquidity, free-float capacity | Covariance, stress-testing, benchmark comparison; no direct access to mandate limits (Chief pairs those from memory itself) |
-| **Market and Event Intelligence Lead** (`gateway/roles/market_intelligence.py`) | price/volume moves, foreign flow, broker activity, filings, corporate actions, news | Descriptive "what moved and why" | No statistical significance test for "unusual"; `symbol`/`date` filters on filings/news/foreign-flow are unconfirmed |
+| **Market and Event Intelligence Lead** (`gateway/roles/market_intelligence.py`) | price/volume moves, foreign flow, broker activity, filings, corporate actions, news, `analyze_index` | Descriptive "what moved and why", plus what's inside an index (LQ45, IDX30, KOMPAS100, …) and how its members moved | No statistical significance test for "unusual"; `symbol`/`date` filters on filings/news/foreign-flow are unconfirmed |
 | **Independent Risk and Evidence Officer** (`gateway/roles/independent_risk_officer.py`) | same data tools as the other three (can reproduce a calculation) | Reviews a draft answer's evidence/calculations → PASS / PASS WITH LIMITATIONS / REVISE / DATA BLOCKED / HUMAN ESCALATION | Most expensive step per question — Chief calls it selectively, not on every question |
 
 Two things enforced only in the Chief's system prompt, not structurally: it cannot
@@ -326,6 +328,7 @@ Sectors bills roughly 1 credit per report *section* requested, not per call:
 | `screen "<where>"` | `companies/` | 1 credit per distinct query | 0 for an identical repeat, until TTL expires |
 | `run-job universe_close` (whole market) | `close/`, paginated | ~33 credits (962 symbols ÷ 30/page) | shared across every symbol/user — run once/day |
 | `analyze-portfolio` / `-liquidity` / `-returns` | Postgres only | **0** | **0** — never calls the Sectors API |
+| `analyze_index` (agent tool, e.g. `lq45`) | none — membership is `symbol_master.indices`, filled by the ticker sweep | **0** | **0** — member prices are a free Postgres read; an existing database needs one sweep (`python -m ingest.cli seed`, ~5 credits, or the Monday run) to fill it |
 | `analyze_ownership` (agent tool) | `company/shareholders-composition/{symbol}` | 1 credit | 0, until the symbol's data version bumps |
 | `analyze_liquidity` with `position_shares` (free-float capacity) | same endpoint, for shares outstanding | 1 credit first time per symbol | 0 after — free float % itself is a free weekly Postgres read |
 

@@ -215,14 +215,14 @@ async def chat_completions(request: Request):
         # streamed body has been sent to the client, sees the real answer.
         result: dict = {}
         response = StreamingResponse(
-            _stream_response(agent, strands_messages, model_name, question, user_id, result),
+            _stream_response(agent, strands_messages, model_name, question, user_id, session_id, result),
             media_type="text/event-stream",
             background=BackgroundTask(memory_extraction.maybe_extract, get_db(), user_id, session_id, question, result),
         )
         response.headers[SESSION_HEADER] = session_id
         return response
 
-    with traced_conversation(question, model_name, user_id) as span:
+    with traced_conversation(question, model_name, user_id, session_id) as span:
         text = await _run_to_completion(agent, strands_messages)
         answer = attach_disclaimer(text)
         span.set_output(answer)
@@ -267,7 +267,7 @@ async def _run_to_completion(agent, messages: list[dict]) -> str:
 
 
 async def _stream_response(
-    agent, messages: list[dict], model_name: str, question: str, user_id: str, result: dict
+    agent, messages: list[dict], model_name: str, question: str, user_id: str, session_id: str, result: dict
 ):
     """Confirmed live (2026-09-24) that Strands' stream_async() exposes which top-
     level tool the Chief is currently calling via event["current_tool_use"]["name"]
@@ -288,7 +288,7 @@ async def _stream_response(
     completion_id_ = compat.completion_id()
     chunks: list[str] = []
     last_step: str | None = None
-    with traced_conversation(question, model_name, user_id) as span:
+    with traced_conversation(question, model_name, user_id, session_id) as span:
         async for event in agent.stream_async(prompt=messages):
             tool_name = (event.get("current_tool_use") or {}).get("name")
             if tool_name and tool_name != last_step:

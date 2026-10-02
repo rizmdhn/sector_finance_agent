@@ -27,6 +27,7 @@ from data.repositories import (
     ensure_valid_symbol,
     get_company_report,
     get_free_float,
+    get_index_constituents,
     get_shareholders_composition,
 )
 from data.sectors_client import SectorsClient
@@ -160,6 +161,68 @@ def returns_snapshot(db: Database, symbol: str, period: str) -> dict:
         "period_returns": period_returns,
         "max_drawdown": max_dd,
         "label": PRICE_LABEL_CAVEAT,
+    }
+
+
+def index_snapshot(db: Database, index: str, period: str) -> dict:
+    """How an index's current members moved over `period`, from ingested closes.
+
+    Membership (symbol_master.indices) and the moves are both Postgres-only: zero
+    credits. The window reported is what the data actually
+    covers, which on a young install can be much shorter than `period`.
+    """
+    days = PERIOD_TO_DAYS.get(period)
+    if days is None:
+        raise ValueError(f"unknown period: {period}")
+    members = get_index_constituents(db, index)
+    end = db.latest_trade_date() or idx_today()
+    start = end - timedelta(days=days)
+
+    sectors = {row["symbol"]: row["sector"] for row in db.get_symbol_master()}
+    moves: list[dict] = []
+    missing: list[str] = []
+    first_dates: list[date] = []
+    last_dates: list[date] = []
+    for member in members:
+        rows = [r for r in db.read_price_range(member["symbol"], start, end) if r["close"] is not None]
+        change = returns.simple_return(float(rows[-1]["close"]), float(rows[0]["close"])) if len(rows) >= 2 else UNAVAILABLE
+        if is_missing(change):
+            missing.append(member["symbol"])
+            continue
+        first_dates.append(rows[0]["trade_date"])
+        last_dates.append(rows[-1]["trade_date"])
+        moves.append(
+            {"symbol": member["symbol"], "name": member["name"], "sector": sectors.get(member["symbol"]), "price_return": change}
+        )
+
+    ranked = sorted(moves, key=lambda m: m["price_return"], reverse=True)
+    by_sector: dict[str, list[float]] = {}
+    for m in moves:
+        by_sector.setdefault(m["sector"] or "Unknown", []).append(m["price_return"])
+    return {
+        "index": index.strip().lower(),
+        "period_requested": period,
+        "constituents": members,
+        "with_price_data": len(moves),
+        "window": {"start": min(first_dates), "end": max(last_dates)} if moves else None,
+        "advancers": sum(1 for m in moves if m["price_return"] > 0),
+        "decliners": sum(1 for m in moves if m["price_return"] < 0),
+        "unchanged": sum(1 for m in moves if m["price_return"] == 0),
+        "average_price_return": sum(m["price_return"] for m in moves) / len(moves) if moves else UNAVAILABLE,
+        "by_sector": {
+            sector: {"members": len(vals), "average_price_return": sum(vals) / len(vals)}
+            for sector, vals in sorted(by_sector.items(), key=lambda kv: sum(kv[1]) / len(kv[1]), reverse=True)
+        },
+        "top_gainers": ranked[:5],
+        "top_losers": ranked[::-1][:5],
+        "missing_price_symbols": missing,
+        "label": (
+            f"{PRICE_LABEL_CAVEAT}. average_price_return is an equal-weighted mean of the "
+            "members, NOT the official index level (which is weighted). Members are the "
+            "index's CURRENT constituents applied to the whole window, so past "
+            "membership changes aren't reflected. `window` is the range the ingested "
+            "prices actually cover — it can be shorter than period_requested."
+        ),
     }
 
 

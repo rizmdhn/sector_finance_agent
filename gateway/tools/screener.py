@@ -11,7 +11,8 @@ def screen_companies(where: str, order_by: str, limit: int) -> list[dict]:
     """Screen IDX-listed companies against structured filters.
 
     Args:
-        where: A SQL-like condition string, e.g. "sector='Financials' and market_cap>1000000000000".
+        where: A SQL-like condition string, e.g. "sector='Financials' and market_cap>1000000000000" (index
+            membership is also filterable: "indices in ['lq45']").
         order_by: Field to sort by; prefix with "-" for descending, e.g. "-market_cap".
         limit: Max number of results.
     """

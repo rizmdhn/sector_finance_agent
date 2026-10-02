@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS symbol_master (
     listing_date DATE,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Index membership (lq45, idx30, ...) as a property of the ticker, lowercase — the
+-- screener returns it per company, and the weekly symbol_master sweep carries it at
+-- no extra call. NULL = never loaded (a database from before this column existed,
+-- until its next sweep); {} = loaded, belongs to no index. Separate ALTER because
+-- CREATE TABLE IF NOT EXISTS won't add a column to an existing table.
+ALTER TABLE symbol_master ADD COLUMN IF NOT EXISTS indices TEXT[];
 
 -- INGEST: daily full-universe close. Primary price store.
 CREATE TABLE IF NOT EXISTS price_daily (
