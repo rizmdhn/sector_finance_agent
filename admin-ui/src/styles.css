@@ -1768,7 +1768,7 @@
 .trace-step {
   line-height: 1.3;
   display: grid;
-  grid-template-columns: 48px 1fr;
+  grid-template-columns: 56px 1fr;
   column-gap: 8px;
   align-items: baseline;
 }
@@ -1801,6 +1801,33 @@
   font-size: 12px;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+.trace-count {
+  color: var(--text);
+}
+
+.trace-group > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.trace-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.trace-group > summary .trace-kind::before {
+  content: "▸ ";
+}
+
+.trace-group[open] > summary .trace-kind::before {
+  content: "▾ ";
+}
+
+.trace-group > .trace-steps {
+  margin: 6px 0 0 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
 }
 
 .trace-link {
