@@ -19,11 +19,16 @@ import uuid
 from data.credit_gate import SectorsCallDenied
 
 APPROVAL_TIMEOUT_SECONDS = 120
-DECISIONS = ("approve", "approve_session", "deny")
+# "Allow this reply" lets one chat reply spend up to this many more credits without asking
+# again, so a broad question (an index, many tickers) is one prompt, not dozens. A cap, not
+# unlimited, because a model can fan out far more calls than the user pictured.
+REPLY_ALLOWANCE_CREDITS = 10
+DECISIONS = ("approve", "approve_reply", "approve_session", "deny")
 
 
 class _Pending:
-    def __init__(self, session_id: str, description: str, credits: int):
+    def __init__(self, gate: "_SessionGate", session_id: str, description: str, credits: int):
+        self.gate = gate
         self.id = uuid.uuid4().hex
         self.session_id = session_id
         self.description = description
@@ -36,9 +41,10 @@ class _Pending:
 class _SessionGate:
     def __init__(self, broker: "ApprovalBroker", session_id: str):
         self._broker, self._session_id = broker, session_id
+        self.allowance = 0  # credits left from an "Allow this reply" answer; one gate = one reply
 
     def check(self, description: str, credits: int) -> None:
-        self._broker.request(self._session_id, description, credits)
+        self._broker.request(self._session_id, description, credits, self)
 
 
 class ApprovalBroker:
@@ -51,13 +57,16 @@ class ApprovalBroker:
     def gate_for(self, session_id: str) -> _SessionGate:
         return _SessionGate(self, session_id)
 
-    def request(self, session_id: str, description: str, credits: int) -> None:
+    def request(self, session_id: str, description: str, credits: int, gate: "_SessionGate | None" = None) -> None:
         """Blocks the calling (tool) thread until answered. Returns to allow the call,
         raises SectorsCallDenied otherwise — including when nobody answers in time."""
         with self._lock:
             if session_id in self._allowed_sessions:
                 return
-            pending = _Pending(session_id, description, credits)
+            if gate is not None and gate.allowance >= credits:
+                gate.allowance -= credits
+                return
+            pending = _Pending(gate, session_id, description, credits)
             self._pending[pending.id] = pending
 
         pending.event.wait(self._timeout)
@@ -67,7 +76,7 @@ class ApprovalBroker:
             decision = pending.decision
             if decision == "approve_session":
                 self._allowed_sessions.add(session_id)
-        if decision in ("approve", "approve_session"):
+        if decision in ("approve", "approve_reply", "approve_session"):
             return
         if decision is None:
             raise SectorsCallDenied(
@@ -96,7 +105,7 @@ class ApprovalBroker:
 
     def resolve(self, approval_id: str, decision: str) -> bool:
         """False if it's already gone (answered, or timed out). "Approve for this chat"
-        also releases every other call of that session currently waiting."""
+        (or "this reply", up to its credit cap) also releases every other call of that session currently waiting."""
         with self._lock:
             pending = self._pending.get(approval_id)
             if pending is None:
@@ -106,6 +115,13 @@ class ApprovalBroker:
             if decision == "approve_session":
                 for other in self._pending.values():
                     if other.session_id == pending.session_id and other.decision is None:
+                        other.decision = "approve"
+                        other.event.set()
+            elif decision == "approve_reply":
+                pending.gate.allowance = REPLY_ALLOWANCE_CREDITS - pending.credits
+                for other in self._pending.values():
+                    if other.gate is pending.gate and other.decision is None and other.credits <= pending.gate.allowance:
+                        pending.gate.allowance -= other.credits
                         other.decision = "approve"
                         other.event.set()
             return True

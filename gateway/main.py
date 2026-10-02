@@ -5,16 +5,18 @@ See idx_agent_infrastructure_diagrams_md.md sections 2-4.
 
 import hmac
 import os
+import re
 import secrets
 import uuid
 
+import httpx
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from gateway import compat, eval_runner, memory_extraction
+from gateway import compat, eval_runner, memory_extraction, trace_view
 from gateway.approvals import DECISIONS, ApprovalBroker
 from gateway.agent import build_agent
 from gateway.guardrails import (
@@ -34,6 +36,7 @@ SESSION_HEADER = "X-Session-Id"
 # admin-ui sends this to opt in to approving each real Sectors call. Other clients
 # (LibreChat, curl) never send it, so their behaviour is unchanged: no prompt, no wait.
 APPROVAL_MODE_HEADER = "X-Approval-Mode"
+TRACE_HEADER = "X-Trace-Id"
 
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_TTL_SECONDS = 7 * 24 * 3600
@@ -236,9 +239,10 @@ async def chat_completions(request: Request):
         text = await _run_to_completion(agent, strands_messages)
         answer = attach_disclaimer(text)
         span.set_output(answer)
+        trace_id = span.trace_id
     return JSONResponse(
         compat.completion_response(compat.completion_id(), model_name, answer),
-        headers={SESSION_HEADER: session_id},
+        headers={SESSION_HEADER: session_id, TRACE_HEADER: trace_id},
         background=BackgroundTask(
             memory_extraction.maybe_extract, get_db(), user_id, session_id, question, {"answer": answer}
         ),
@@ -303,6 +307,8 @@ async def _stream_response(
     # threads) actually runs.
     credit_gate.set_gate(approval_gate)
     with traced_conversation(question, model_name, user_id, session_id) as span:
+        # Non-standard field like `step`: lets the UI link this reply to its Phoenix trace.
+        yield compat.sse_chunk(completion_id_, model_name, {"trace_id": span.trace_id})
         async for event in agent.stream_async(prompt=messages):
             tool_name = (event.get("current_tool_use") or {}).get("name")
             if tool_name and tool_name != last_step:
@@ -424,6 +430,19 @@ class UpdateTierRequest(BaseModel):
 
 class ApprovalDecision(BaseModel):
     decision: str
+
+
+@app.get("/v1/admin/traces/{trace_id}", dependencies=[Depends(_check_auth)])
+def get_trace(trace_id: str) -> dict:
+    """One chat turn's agents/tools/tokens/credits, read back from Phoenix. `ready` is
+    false while the trace is still being exported — poll again in a few seconds."""
+    if not re.fullmatch(r"[0-9a-f]{32}", trace_id):
+        raise HTTPException(status_code=400, detail="invalid trace id")
+    try:
+        summary = trace_view.fetch_trace(trace_id)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Phoenix unreachable: {exc}") from exc
+    return {"ready": summary is not None, **(summary or {})}
 
 
 @app.get("/v1/admin/approvals", dependencies=[Depends(_check_auth)])

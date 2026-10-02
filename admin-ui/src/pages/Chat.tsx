@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { listPendingApprovals, resolveApproval, type ApprovalDecision, type PendingApproval } from "../api/approvals";
-import { createSession, deleteSession, listSessions, sendMessage } from "../api/chat";
+import { createSession, deleteSession, listSessions, sendMessage, setMessageCredits } from "../api/chat";
+import { fetchTraceWhenReady } from "../api/traces";
 import { ApiError } from "../api/client";
 import { ROLES } from "../api/modelTiers";
 import { Markdown } from "../markdown";
+import TracePanel from "../TracePanel";
 import type { ChatMessage, ChatSession } from "../types";
 
 // Friendly labels for the `step` values gateway/main.py's SSE stream can send —
@@ -73,6 +75,7 @@ export default function Chat({ userId }: { userId: string }) {
   const [askApproval, setAskApproval] = useState(readAskApproval);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [traceId, setTraceId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -133,13 +136,12 @@ export default function Chat({ userId }: { userId: string }) {
     };
   }, [sending, activeId]);
 
-  async function handleDecision(approval: PendingApproval, decision: ApprovalDecision) {
-    setPendingApprovals((prev) => prev.filter((p) => p.id !== approval.id));
-    try {
-      await resolveApproval(approval.id, decision);
-    } catch {
-      // 404 = it already timed out or was answered elsewhere; the next poll clears it
-    }
+  // One answer covers everything waiting right now — a broad question can queue many calls.
+  async function handleDecision(decision: ApprovalDecision) {
+    const batch = pendingApprovals;
+    setPendingApprovals([]);
+    await Promise.all(batch.map((approval) => resolveApproval(approval.id, decision).catch(() => undefined)));
+    // a 404 = it already timed out or was answered via an earlier one in the batch
   }
 
   function handleToggleAskApproval(next: boolean) {
@@ -158,9 +160,11 @@ export default function Chat({ userId }: { userId: string }) {
     setDraft("");
     setSendError(null);
     setDrawerOpen(false);
+    setTraceId(null);
   }
 
   function handleOpen(id: string) {
+    setTraceId(null);
     setActiveId(id);
     setSendError(null);
     setDrawerOpen(false);
@@ -212,6 +216,8 @@ export default function Chat({ userId }: { userId: string }) {
     try {
       const updated = await sendMessage(sid, text, setCurrentStep, setStreamingText, controller.signal, askApproval);
       setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
+      const reply = updated.messages[updated.messages.length - 1];
+      if (reply?.traceId) void recordCredits(updated.id, reply.id, reply.traceId);
     } catch (err) {
       // The user's message is already saved (sendMessage pushes it before the
       // network call) — reload so the bubble shows even though the reply failed.
@@ -227,6 +233,20 @@ export default function Chat({ userId }: { userId: string }) {
       setCurrentStep(null);
       setStreamingText("");
     }
+  }
+
+  // Fills in the reply's credit chip once Phoenix has the trace (a few seconds after the reply).
+  async function recordCredits(sessionId: string, messageId: string, id: string) {
+    const trace = await fetchTraceWhenReady(id);
+    if (!trace) return;
+    setMessageCredits(sessionId, messageId, trace.credits);
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === sessionId
+          ? { ...session, messages: session.messages.map((m) => (m.id === messageId ? { ...m, credits: trace.credits } : m)) }
+          : session
+      )
+    );
   }
 
   function handleStop() {
@@ -245,6 +265,7 @@ export default function Chat({ userId }: { userId: string }) {
   }
 
   const groups = groupSessions(sessions);
+  const chatCredits = active?.messages.reduce((sum, m) => sum + (m.credits ?? 0), 0) ?? 0;
 
   return (
     <div className="page page--chat">
@@ -302,6 +323,11 @@ export default function Chat({ userId }: { userId: string }) {
               ☰
             </button>
             <span className="chat-header-title">{active?.title ?? "New chat"}</span>
+            {chatCredits > 0 && (
+              <span className="chat-credits" title="Sectors credits spent in this chat">
+                {chatCredits} credit{chatCredits === 1 ? "" : "s"} used
+              </span>
+            )}
             <label
               className="switch"
               title={sending ? "Can't change while a reply is in progress" : "Pause and ask before any Sectors call that costs credit"}
@@ -321,29 +347,33 @@ export default function Chat({ userId }: { userId: string }) {
 
           {pendingApprovals.length > 0 && (
             <div className="approval-stack">
-              {pendingApprovals.map((approval) => (
-                <div key={approval.id} className="approval-card" role="alertdialog" aria-label="Approve Sectors API call">
-                  <div className="approval-title">
-                    Permission needed — this uses about {approval.credits} Sectors credit
-                    {approval.credits === 1 ? "" : "s"}
-                  </div>
-                  <code className="approval-call">{approval.description}</code>
-                  <p className="approval-note">
-                    Nothing is fetched until you answer. No answer within {approval.timeout_seconds}s counts as "no".
-                  </p>
-                  <div className="approval-actions">
-                    <button type="button" onClick={() => handleDecision(approval, "approve")}>
-                      Allow once
-                    </button>
-                    <button type="button" onClick={() => handleDecision(approval, "approve_session")}>
-                      Allow for this chat
-                    </button>
-                    <button type="button" className="approval-deny" onClick={() => handleDecision(approval, "deny")}>
-                      Don't fetch
-                    </button>
-                  </div>
+              <div className="approval-card" role="alertdialog" aria-label="Approve Sectors API calls">
+                <div className="approval-title">
+                  Permission needed — {pendingApprovals.length === 1 ? "1 call" : `${pendingApprovals.length} calls`} to
+                  Sectors, about {pendingApprovals.reduce((sum, p) => sum + p.credits, 0)} credit
+                  {pendingApprovals.reduce((sum, p) => sum + p.credits, 0) === 1 ? "" : "s"}
                 </div>
-              ))}
+                {pendingApprovals.slice(0, 4).map((approval) => (
+                  <code key={approval.id} className="approval-call">
+                    {approval.description}
+                  </code>
+                ))}
+                {pendingApprovals.length > 4 && <p className="approval-note">…and {pendingApprovals.length - 4} more</p>}
+                <p className="approval-note">
+                  Nothing is fetched until you answer. No answer within {pendingApprovals[0].timeout_seconds}s counts as "no".
+                </p>
+                <div className="approval-actions">
+                  <button type="button" onClick={() => handleDecision("approve_reply")}>
+                    Allow for this reply (up to 10 credits)
+                  </button>
+                  <button type="button" onClick={() => handleDecision("approve_session")}>
+                    Allow for this chat
+                  </button>
+                  <button type="button" className="approval-deny" onClick={() => handleDecision("deny")}>
+                    Don't fetch
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -384,6 +414,17 @@ export default function Chat({ userId }: { userId: string }) {
                       </div>
                       <div className="msg-body">
                         <Markdown text={message.content} />
+                        {message.traceId && (
+                          <button
+                            type="button"
+                            className={`trace-chip ${traceId === message.traceId ? "trace-chip--open" : ""}`}
+                            onClick={() => setTraceId(traceId === message.traceId ? null : (message.traceId ?? null))}
+                          >
+                            Trace
+                            {message.credits !== undefined &&
+                              ` · ${message.credits} credit${message.credits === 1 ? "" : "s"}`}
+                          </button>
+                        )}
                       </div>
                     </div>
                   )
@@ -445,6 +486,7 @@ export default function Chat({ userId }: { userId: string }) {
             <p className="chat-hint">Real model calls — real Sectors credit can be spent. Enter to send, Shift+Enter for a new line.</p>
           </div>
         </section>
+        {traceId && <TracePanel traceId={traceId} onClose={() => setTraceId(null)} />}
       </div>
     </div>
   );

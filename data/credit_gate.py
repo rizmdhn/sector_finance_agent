@@ -29,3 +29,13 @@ def set_gate(gate: CreditGate | None) -> None:
 
 def current_gate() -> CreditGate | None:
     return _gate.get()
+
+
+def record_spend(description: str, credits: int) -> None:
+    """Note a REAL (non-cached) Sectors call on the current trace span, so the UI's trace
+    view can total credits per reply. A no-op where OpenTelemetry isn't installed."""
+    try:
+        from opentelemetry import trace
+    except ImportError:
+        return
+    trace.get_current_span().add_event("sectors_call", {"call": description, "credits": credits})

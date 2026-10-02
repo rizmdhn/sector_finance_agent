@@ -355,9 +355,11 @@ free until the underlying data actually changes.
 
 In the admin-ui Chat, a call that would spend Sectors credit asks you first. When the
 agent is about to make a **real** Sectors call (a cache miss — cached answers never ask),
-a card appears in the chat showing the call and its estimated cost, and the call waits:
+a single card appears in the chat listing the waiting calls and their estimated cost
+(calls queued together share one card), and they wait:
 
-- **Allow once** — make this call.
+- **Allow for this reply** — make these calls and any more this one reply needs, up to 10
+  credits; past that it asks again. A broad question (an index, several tickers) is one prompt.
 - **Allow for this chat** — stop asking for the rest of this conversation.
 - **Don't fetch** — skip it; the agent tells you the data wasn't fetched because you declined.
 
@@ -373,3 +375,7 @@ process (what `docker compose` runs).
 See [PROGRESS.md](PROGRESS.md) for the detailed, dated verification log behind
 every claim above (what was confirmed live against real infrastructure, real
 bugs found and fixed, open items).
+
+## Reply trace
+
+Each assistant reply has a **Trace · N credits** chip. It opens a drawer listing the agents consulted, tools called, model calls, tokens, time and Sectors credits spent, with an "Open in Phoenix" link. The data is read back from Phoenix (`GET /v1/admin/traces/{id}`), so it can take a few seconds to appear after a reply. Set `PHOENIX_PUBLIC_URL` if Phoenix isn't at `http://localhost:6006` from your browser. Red rows are failed or declined calls.

@@ -172,6 +172,10 @@ class _ConversationSpan:
     def __init__(self, span):
         self._span = span
 
+    @property
+    def trace_id(self) -> str:
+        return f"{self._span.get_span_context().trace_id:032x}"
+
     def set_output(self, answer: str) -> None:
         self._span.set_attribute(SpanAttributes.OUTPUT_VALUE, answer)
 

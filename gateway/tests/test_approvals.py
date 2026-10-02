@@ -93,3 +93,34 @@ def test_approval_is_scoped_to_its_own_session():
 
 def test_resolving_something_already_gone_reports_false():
     assert ApprovalBroker().resolve("nope", "approve") is False
+
+
+def test_allow_this_reply_covers_later_calls_of_that_reply_only_up_to_the_cap():
+    broker, results = ApprovalBroker(timeout_seconds=5), []
+    gate, other_reply = broker.gate_for("s1"), broker.gate_for("s1")
+
+    def run(g, credits=3):
+        try:
+            g.check("call", credits)
+            results.append("allowed")
+        except SectorsCallDenied:
+            results.append("denied")
+
+    first = threading.Thread(target=run, args=(gate,))
+    first.start()
+    broker.resolve(_pending(broker, "s1")[0]["id"], "approve_reply")
+    first.join(2)
+
+    for _ in range(2):  # 3 + 3 + 3 = 9 of the 10-credit allowance: no prompt for these
+        run(gate)
+    assert results == ["allowed"] * 3 and broker.list_pending("s1") == []
+
+    over = threading.Thread(target=run, args=(gate,))  # 12 > 10: asks again
+    over.start()
+    _pending(broker, "s1")
+    nxt = threading.Thread(target=run, args=(other_reply,))  # another reply never inherits it
+    nxt.start()
+    _pending(broker, "s1", count=2)
+    for p in broker.list_pending("s1"):
+        broker.resolve(p["id"], "deny")
+    over.join(2), nxt.join(2)

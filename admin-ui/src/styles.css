@@ -1657,3 +1657,162 @@
     transition: none;
   }
 }
+
+/* ---- Reply trace: chip under each answer + right-hand drawer ---- */
+.chat-credits {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.trace-chip {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.trace-chip:hover,
+.trace-chip--open {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text-h);
+}
+
+.trace-panel {
+  width: 340px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.trace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 500;
+  color: var(--text-h);
+}
+
+.trace-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.trace-close:hover {
+  background: var(--accent-bg);
+}
+
+.trace-note {
+  margin: 0;
+  color: var(--text);
+}
+
+.trace-totals {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+}
+
+.trace-totals > div {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.trace-totals dt {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.trace-totals dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-h);
+  font-variant-numeric: tabular-nums;
+}
+
+.trace-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trace-step {
+  line-height: 1.3;
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  column-gap: 8px;
+  align-items: baseline;
+}
+
+.trace-kind {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.trace-step--agent .trace-kind {
+  color: var(--accent);
+}
+
+.trace-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-h);
+}
+
+.trace-step--agent .trace-name {
+  font-weight: 500;
+}
+
+.trace-step--error .trace-name {
+  color: #dc2626;
+}
+
+.trace-meta {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.trace-link {
+  color: var(--accent);
+}
+
+@media (max-width: 720px) {
+  .trace-panel {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 20;
+    width: min(340px, 92%);
+    box-shadow: var(--shadow);
+  }
+}

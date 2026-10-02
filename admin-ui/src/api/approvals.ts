@@ -14,7 +14,7 @@ export interface PendingApproval {
   timeout_seconds: number;
 }
 
-export type ApprovalDecision = "approve" | "approve_session" | "deny";
+export type ApprovalDecision = "approve" | "approve_reply" | "approve_session" | "deny";
 
 export async function listPendingApprovals(sessionId: string): Promise<PendingApproval[]> {
   const result = await apiFetch<{ pending: PendingApproval[] }>(

@@ -149,9 +149,11 @@ class SectorsClient:
         if self._cache is not None and self._cache.is_negative_cached(negative_cache_key):
             raise SectorsNotFoundError(404, f"negative-cached: {path}")
 
+        description, credits = _describe_call(path, query), _estimate_credits(endpoint_key, query)
         gate = credit_gate.current_gate()
         if gate is not None:
-            gate.check(_describe_call(path, query), _estimate_credits(endpoint_key, query))
+            gate.check(description, credits)
+        credit_gate.record_spend(description, credits)
 
         self._rate_limiter.acquire()
         response = self._http.get(path, params=query)

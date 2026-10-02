@@ -27,7 +27,7 @@ const SESSION_HEADER = "X-Session-Id";
 const CHAT_MODEL = "idx-analyst-claude";
 
 interface CompletionChunk {
-  choices: { delta: { content?: string; step?: string } }[];
+  choices: { delta: { content?: string; step?: string; trace_id?: string } }[];
 }
 
 function loadSessions(): ChatSession[] {
@@ -56,6 +56,14 @@ export async function listSessions(userId: string): Promise<ChatSession[]> {
 
 export function deleteSession(sessionId: string): void {
   saveSessions(loadSessions().filter((s) => s.id !== sessionId));
+}
+
+export function setMessageCredits(sessionId: string, messageId: string, credits: number): void {
+  const sessions = loadSessions();
+  const message = sessions.find((s) => s.id === sessionId)?.messages.find((m) => m.id === messageId);
+  if (!message) return;
+  message.credits = credits;
+  saveSessions(sessions);
 }
 
 export async function createSession(userId: string): Promise<ChatSession> {
@@ -125,6 +133,7 @@ export async function sendMessage(
   let buffer = "";
   let text = "";
   let stopped = false;
+  let traceId: string | undefined;
 
   // Aborting `signal` (Chat.tsx's Stop button) rejects reader.read() below with
   // an AbortError — caught here rather than left to propagate, so whatever
@@ -149,6 +158,7 @@ export async function sendMessage(
         if (raw === "[DONE]") continue;
         const chunk = JSON.parse(raw) as CompletionChunk;
         const delta = chunk.choices[0]?.delta ?? {};
+        if (delta.trace_id) traceId = delta.trace_id;
         if (delta.step) onStep?.(delta.step);
         if (delta.content) {
           text += delta.content;
@@ -170,6 +180,7 @@ export async function sendMessage(
         : "_(stopped before a reply arrived)_"
       : text || "(empty response)",
     createdAt: new Date().toISOString(),
+    traceId,
   };
   session.messages.push(assistantMessage);
   saveSessions(sessions);

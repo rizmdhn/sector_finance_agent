@@ -94,6 +94,10 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  // Assistant replies only: the Phoenix trace of this turn, and the Sectors credits it
+  // spent (filled in once the trace has been exported).
+  traceId?: string;
+  credits?: number;
 }
 
 export interface ChatSession {
