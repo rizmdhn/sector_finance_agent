@@ -54,6 +54,10 @@ export async function listSessions(userId: string): Promise<ChatSession[]> {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+export function deleteSession(sessionId: string): void {
+  saveSessions(loadSessions().filter((s) => s.id !== sessionId));
+}
+
 export async function createSession(userId: string): Promise<ChatSession> {
   const sessions = loadSessions();
   const session: ChatSession = {
