@@ -29,6 +29,22 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "evals", label: "Evals" },
 ];
 
+const THEME_KEY = "idx-admin-ui.theme.v1";
+type Theme = "light" | "dark";
+
+function systemTheme(): Theme {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function readThemeChoice(): Theme | null {
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    return stored === "light" || stored === "dark" ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
 const USER_ID_KEY = "idx-admin-ui.user-id.v1";
 const DEFAULT_USER_ID = "demo-user";
 
@@ -47,6 +63,10 @@ function readUserId(): string {
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
+  // null = never chosen, follow the OS; the choice is applied to <html> by index.html on
+  // load and here on change.
+  const [themeChoice, setThemeChoice] = useState<Theme | null>(readThemeChoice);
+  const theme: Theme = themeChoice ?? systemTheme();
   const [readiness, setReadiness] = useState<ReadinessState | null>(null);
   const [tab, setTab] = useState<Tab>(readTab);
   useEffect(() => {
@@ -86,6 +106,17 @@ export default function App() {
     setUserIdState(trimmed);
     try {
       localStorage.setItem(USER_ID_KEY, trimmed);
+    } catch {
+      // Private browsing / storage disabled — the choice just won't persist.
+    }
+  }
+
+  function handleToggleTheme() {
+    const next: Theme = theme === "dark" ? "light" : "dark";
+    setThemeChoice(next);
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem(THEME_KEY, next);
     } catch {
       // Private browsing / storage disabled — the choice just won't persist.
     }
@@ -169,6 +200,15 @@ export default function App() {
             onBlur={() => setUserId(userDraft)}
           />
         </form>
+        <button
+          type="button"
+          className="logout-btn theme-btn"
+          onClick={handleToggleTheme}
+          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
         <button className="logout-btn" onClick={handleLogout}>
           Sign out
         </button>

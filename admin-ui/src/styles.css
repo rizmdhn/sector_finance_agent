@@ -83,6 +83,15 @@
   flex: 1;
 }
 
+/* The app shell is full width (Chat uses all of it); the text-heavy pages keep a
+   centered readable column instead of stretching across a wide screen. */
+.page:not(.page--chat) {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1126px;
+  margin: 0 auto;
+}
+
 .page-header h1 {
   margin: 0 0 8px;
   font-size: 32px;
@@ -883,6 +892,18 @@
 .logout-btn:hover {
   border-color: #e0525a;
   color: #e0525a;
+}
+
+.theme-btn {
+  min-width: 38px;
+  padding: 5px 10px;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.theme-btn:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
 }
 
 /* -- Approval for credit-spending Sectors calls ------------------------------- */
