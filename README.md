@@ -351,6 +351,23 @@ free until the underlying data actually changes.
 
 </details>
 
+### Approval before spending credits
+
+In the admin-ui Chat, a call that would spend Sectors credit asks you first. When the
+agent is about to make a **real** Sectors call (a cache miss — cached answers never ask),
+a card appears in the chat showing the call and its estimated cost, and the call waits:
+
+- **Allow once** — make this call.
+- **Allow for this chat** — stop asking for the rest of this conversation.
+- **Don't fetch** — skip it; the agent tells you the data wasn't fetched because you declined.
+
+No answer within 120 seconds counts as "no". The toggle under the message box (**Ask me
+before spending Sectors credits**, on by default) turns it off. Only admin-ui opts in
+(`X-Approval-Mode: ask`); LibreChat, curl and the ingest worker are unchanged. The answer
+is stored by the gateway and set only through an authenticated call, so the agent can't
+approve itself by writing "yes" in the chat. It lives in memory, so it assumes one gateway
+process (what `docker compose` runs).
+
 ---
 
 See [PROGRESS.md](PROGRESS.md) for the detailed, dated verification log behind

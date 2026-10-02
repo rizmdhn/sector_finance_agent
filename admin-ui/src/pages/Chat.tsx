@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { createSession, listSessions, sendMessage } from "../api/chat";
+import { listPendingApprovals, resolveApproval, type ApprovalDecision, type PendingApproval } from "../api/approvals";
 import { ApiError } from "../api/client";
 import { ROLES } from "../api/modelTiers";
 import { Markdown } from "../markdown";
@@ -14,6 +15,18 @@ const STEP_LABELS: Record<string, string> = {
   add_memory: "Saving to memory…",
 };
 
+const ASK_APPROVAL_KEY = "idx-admin-ui.ask-approval.v1";
+const APPROVAL_POLL_MS = 1000;
+
+// On by default: this project exists to control Sectors credit spend.
+function readAskApproval(): boolean {
+  try {
+    return localStorage.getItem(ASK_APPROVAL_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
 function stepLabel(step: string): string {
   return STEP_LABELS[step] ?? `Working (${step})…`;
 }
@@ -27,6 +40,8 @@ export default function Chat({ userId }: { userId: string }) {
   const [streamingText, setStreamingText] = useState("");
   const [loading, setLoading] = useState(true);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [askApproval, setAskApproval] = useState(readAskApproval);
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -44,6 +59,49 @@ export default function Chat({ userId }: { userId: string }) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeId, sessions, streamingText]);
+
+  // While a message is in flight, a tool may be parked waiting for a yes/no on a real
+  // Sectors call (gateway/approvals.py) — poll for it. The session id is the chat's
+  // own id, the same value sent as X-Session-Id.
+  useEffect(() => {
+    if (!sending || !activeId) {
+      setPendingApprovals([]);
+      return;
+    }
+    let cancelled = false;
+    async function poll() {
+      try {
+        const pending = await listPendingApprovals(activeId as string);
+        if (!cancelled) setPendingApprovals(pending);
+      } catch {
+        // transient — keep what's shown and retry on the next tick
+      }
+    }
+    poll();
+    const timer = setInterval(poll, APPROVAL_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [sending, activeId]);
+
+  async function handleDecision(approval: PendingApproval, decision: ApprovalDecision) {
+    setPendingApprovals((prev) => prev.filter((p) => p.id !== approval.id));
+    try {
+      await resolveApproval(approval.id, decision);
+    } catch {
+      // 404 = it already timed out or was answered elsewhere; the next poll clears it
+    }
+  }
+
+  function handleToggleAskApproval(next: boolean) {
+    setAskApproval(next);
+    try {
+      localStorage.setItem(ASK_APPROVAL_KEY, next ? "on" : "off");
+    } catch {
+      // Private browsing / storage disabled — the choice just won't persist.
+    }
+  }
 
   const active = sessions.find((session) => session.id === activeId) ?? null;
 
@@ -83,7 +141,14 @@ export default function Chat({ userId }: { userId: string }) {
     setCurrentStep(null);
     setStreamingText("");
     try {
-      const updated = await sendMessage(activeId, text, setCurrentStep, setStreamingText, controller.signal);
+      const updated = await sendMessage(
+        activeId,
+        text,
+        setCurrentStep,
+        setStreamingText,
+        controller.signal,
+        askApproval
+      );
       setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
     } catch (err) {
       // The user's message is already saved (sendMessage pushes it before the
@@ -155,6 +220,55 @@ export default function Chat({ userId }: { userId: string }) {
 
           {active && (
             <>
+              <div className="chat-toolbar">
+                <span className="chat-toolbar-title">{active.title}</span>
+                <label
+                  className="switch"
+                  title={sending ? "Can't change while a reply is in progress" : "Pause and ask before any Sectors call that costs credit"}
+                >
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={askApproval}
+                    onChange={(event) => handleToggleAskApproval(event.target.checked)}
+                    disabled={sending}
+                  />
+                  <span className="switch-track" aria-hidden="true" />
+                  <span>Ask before spending credits</span>
+                </label>
+              </div>
+              {pendingApprovals.length > 0 && (
+                <div className="approval-stack">
+                  {pendingApprovals.map((approval) => (
+                    <div key={approval.id} className="approval-card" role="alertdialog" aria-label="Approve Sectors API call">
+                      <div className="approval-title">
+                        Permission needed — this uses about {approval.credits} Sectors credit
+                        {approval.credits === 1 ? "" : "s"}
+                      </div>
+                      <code className="approval-call">{approval.description}</code>
+                      <p className="approval-note">
+                        Nothing is fetched until you answer. No answer within {approval.timeout_seconds}s counts as
+                        "no".
+                      </p>
+                      <div className="approval-actions">
+                        <button type="button" onClick={() => handleDecision(approval, "approve")}>
+                          Allow once
+                        </button>
+                        <button type="button" onClick={() => handleDecision(approval, "approve_session")}>
+                          Allow for this chat
+                        </button>
+                        <button
+                          type="button"
+                          className="approval-deny"
+                          onClick={() => handleDecision(approval, "deny")}
+                        >
+                          Don't fetch
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="chat-messages">
                 {active.messages.length === 0 && <p className="empty-note">Say something to start this session.</p>}
                 {active.messages.map((message) => (
@@ -171,7 +285,9 @@ export default function Chat({ userId }: { userId: string }) {
                 )}
                 {sending && !streamingText && (
                   <div className="chat-bubble chat-bubble--assistant chat-bubble--typing">
-                    {currentStep ? (
+                    {pendingApprovals.length > 0 ? (
+                      <span className="chat-step-label">Waiting for your approval…</span>
+                    ) : currentStep ? (
                       <span className="chat-step-label">{stepLabel(currentStep)}</span>
                     ) : (
                       <>

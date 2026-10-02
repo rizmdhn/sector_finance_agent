@@ -117,6 +117,18 @@ def resolve_role_tiers(db: Database, user_id: str) -> dict[str, str]:
     defeating the point of making this live-editable."""
     return {**DEFAULT_ROLE_TIERS, **db.get_role_tiers(user_id)}
 
+# Appended to every agent next to the date. A user can decline a credit-spending
+# Sectors call (gateway/approvals.py); without this the specialist's reply to the Chief
+# says the data is merely "unavailable", hiding that it was never fetched at the
+# user's own request — seen live on the first approval test.
+_DECLINED_CALL_RULE = (
+    "\n\nIf a tool result says the user declined a Sectors API call (or no approval "
+    "arrived), the data was NOT fetched because of that — say exactly that, never "
+    '"unavailable" or "not accessible". Do not retry the call; offer to fetch it if '
+    "they change their mind. Pass this on if you are reporting to another agent."
+)
+
+
 def _today_context() -> str:
     """Real Jakarta-local (IDX trading) date, appended to every agent's system prompt (Chief and
     all 4 specialists) at build time — not baked into the static SYSTEM_PROMPT
@@ -284,7 +296,7 @@ def build_agent(
     # Real date, appended to every one of these 4 specialists' own system prompts
     # too, not just the Chief's below — market_and_event_intelligence_lead and
     # investment_research_lead both reason about "recent"/dated figures directly.
-    today_context = _today_context()
+    today_context = _today_context() + _DECLINED_CALL_RULE
     for specialist in (investment_research_lead, portfolio_risk_lead, market_intelligence_lead, independent_risk_officer):
         specialist.system_prompt += today_context
 

@@ -73,7 +73,8 @@ export async function sendMessage(
   content: string,
   onStep?: (step: string) => void,
   onDelta?: (text: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  askBeforeSpending = false
 ): Promise<ChatSession> {
   const sessions = loadSessions();
   const session = sessions.find((s) => s.id === sessionId);
@@ -96,7 +97,12 @@ export async function sendMessage(
   // real and already sent; only the assistant reply is missing on failure.
   const response = await fetch("/api/v1/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json", [SESSION_HEADER]: sessionId },
+    headers: {
+      "Content-Type": "application/json",
+      [SESSION_HEADER]: sessionId,
+      // Opts in to gateway/approvals.py: each real Sectors call waits for a yes/no.
+      ...(askBeforeSpending ? { "X-Approval-Mode": "ask" } : {}),
+    },
     body: JSON.stringify({
       model: CHAT_MODEL,
       stream: true,

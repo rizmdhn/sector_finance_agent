@@ -726,7 +726,10 @@
   display: flex;
   gap: 20px;
   flex: 1;
-  min-height: 0;
+  /* The reserved minimum lives HERE, not on .chat-panel: the page lets this box shrink
+     (so messages scroll inside the panel), and a panel taller than its shrunken
+     container spilled over the footer note below it. */
+  min-height: 420px;
 }
 
 .session-list {
@@ -795,7 +798,7 @@
   flex-direction: column;
   border: 1px solid var(--border);
   border-radius: 10px;
-  min-height: 420px;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -1035,6 +1038,10 @@
 @media (max-width: 720px) {
   .chat-layout {
     flex-direction: column;
+    min-height: 0;
+  }
+  .chat-panel {
+    min-height: 420px;
   }
   .session-list {
     width: 100%;
@@ -1218,4 +1225,165 @@
 .logout-btn:hover {
   border-color: #e0525a;
   color: #e0525a;
+}
+
+/* -- Approval for credit-spending Sectors calls ------------------------------- */
+
+.approval-card {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.approval-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.approval-call {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--text-h);
+  overflow-wrap: anywhere;
+}
+
+.approval-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-actions button {
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-border);
+  background: var(--bg);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.approval-actions .approval-deny {
+  border-color: #e0525a;
+  color: #e0525a;
+}
+
+.chat-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-toolbar-title {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+/* visually hidden but still focusable/clickable via its label */
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.switch-track {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.15s;
+}
+
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+
+.switch input:checked + .switch-track {
+  background: var(--accent);
+}
+
+.switch input:checked + .switch-track::after {
+  transform: translateX(14px);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.switch input:disabled + .switch-track {
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch-track,
+  .switch-track::after {
+    transition: none;
+  }
+}
+
+/* Outside the scrolling message list on purpose: pinned to the top of the panel, so a
+   pending approval is always in view no matter how far the conversation has scrolled. */
+.approval-stack {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  max-height: 45%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }

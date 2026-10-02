@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from gateway import compat, eval_runner, memory_extraction
+from gateway.approvals import DECISIONS, ApprovalBroker
 from gateway.agent import build_agent
 from gateway.guardrails import (
     RateLimitExceededError,
@@ -24,11 +25,15 @@ from gateway.guardrails import (
 from gateway.registry import PLACEHOLDER_MODEL_ID, has_usable_key, load_registry
 from gateway.roles.orchestrator import DEFAULT_ROLE_TIERS, resolve_role_tiers
 from gateway.telemetry import setup_telemetry, traced_conversation
+from data import credit_gate
 from data.deps import get_cache, get_db
 from data.memory_store import write_memory
 from data.session_repository import ValkeySessionRepository
 
 SESSION_HEADER = "X-Session-Id"
+# admin-ui sends this to opt in to approving each real Sectors call. Other clients
+# (LibreChat, curl) never send it, so their behaviour is unchanged: no prompt, no wait.
+APPROVAL_MODE_HEADER = "X-Approval-Mode"
 
 ADMIN_SESSION_COOKIE = "admin_session"
 ADMIN_SESSION_TTL_SECONDS = 7 * 24 * 3600
@@ -50,6 +55,7 @@ app = FastAPI(title="IDX Agent Gateway", telemetry={"tracing": False})
 _auth_scheme = HTTPBearer()
 
 _registry = load_registry()
+_approvals = ApprovalBroker()
 
 
 def _validate_startup_config() -> None:
@@ -202,6 +208,9 @@ async def chat_completions(request: Request):
     session_id = request.headers.get(SESSION_HEADER) or uuid.uuid4().hex
     is_continuing_session = ValkeySessionRepository(get_cache()).read_session(session_id) is not None
     strands_messages = compat.to_strands_messages(chat_messages[-1:] if is_continuing_session else chat_messages)
+    approval_gate = (
+        _approvals.gate_for(session_id) if request.headers.get(APPROVAL_MODE_HEADER, "").lower() == "ask" else None
+    )
 
     agent = _build_agent_with_fallback(model_entry, user_id=user_id, session_id=session_id)
     if system_prompt:
@@ -215,13 +224,14 @@ async def chat_completions(request: Request):
         # streamed body has been sent to the client, sees the real answer.
         result: dict = {}
         response = StreamingResponse(
-            _stream_response(agent, strands_messages, model_name, question, user_id, session_id, result),
+            _stream_response(agent, strands_messages, model_name, question, user_id, session_id, approval_gate, result),
             media_type="text/event-stream",
             background=BackgroundTask(memory_extraction.maybe_extract, get_db(), user_id, session_id, question, result),
         )
         response.headers[SESSION_HEADER] = session_id
         return response
 
+    credit_gate.set_gate(approval_gate)
     with traced_conversation(question, model_name, user_id, session_id) as span:
         text = await _run_to_completion(agent, strands_messages)
         answer = attach_disclaimer(text)
@@ -267,7 +277,7 @@ async def _run_to_completion(agent, messages: list[dict]) -> str:
 
 
 async def _stream_response(
-    agent, messages: list[dict], model_name: str, question: str, user_id: str, session_id: str, result: dict
+    agent, messages: list[dict], model_name: str, question: str, user_id: str, session_id: str, approval_gate, result: dict
 ):
     """Confirmed live (2026-09-24) that Strands' stream_async() exposes which top-
     level tool the Chief is currently calling via event["current_tool_use"]["name"]
@@ -288,6 +298,10 @@ async def _stream_response(
     completion_id_ = compat.completion_id()
     chunks: list[str] = []
     last_step: str | None = None
+    # Installed here, not in the handler: this generator runs in Starlette's own task,
+    # and the gate must be set in the context where the agent (and so its tool
+    # threads) actually runs.
+    credit_gate.set_gate(approval_gate)
     with traced_conversation(question, model_name, user_id, session_id) as span:
         async for event in agent.stream_async(prompt=messages):
             tool_name = (event.get("current_tool_use") or {}).get("name")
@@ -406,6 +420,26 @@ class UpdateTierRequest(BaseModel):
     # model_for() checks the registry before falling back to tier resolution) —
     # admin-ui's Model Tiering page offers both in one dropdown now.
     tier: str
+
+
+class ApprovalDecision(BaseModel):
+    decision: str
+
+
+@app.get("/v1/admin/approvals", dependencies=[Depends(_check_auth)])
+def list_approvals(session: str) -> dict:
+    """Sectors calls currently waiting for a yes/no in this chat session — polled by
+    admin-ui while a message is in flight (gateway/approvals.py)."""
+    return {"pending": _approvals.list_pending(session)}
+
+
+@app.post("/v1/admin/approvals/{approval_id}", dependencies=[Depends(_check_auth)])
+def resolve_approval(approval_id: str, body: ApprovalDecision) -> dict:
+    if body.decision not in DECISIONS:
+        raise HTTPException(status_code=400, detail=f"decision must be one of {', '.join(DECISIONS)}")
+    if not _approvals.resolve(approval_id, body.decision):
+        raise HTTPException(status_code=404, detail="no such pending approval (already answered, or timed out)")
+    return {"ok": True}
 
 
 @app.get("/v1/admin/readiness", dependencies=[Depends(_check_auth)])

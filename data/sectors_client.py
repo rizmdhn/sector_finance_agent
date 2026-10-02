@@ -53,6 +53,7 @@ Credit protection (original ingest plan doc, section 6):
 
 import httpx
 
+from data import credit_gate
 from data.cache import Cache
 from data.rate_limit import TokenBucket
 
@@ -101,6 +102,23 @@ class SectorsRateLimitError(SectorsAPIError):
     pass
 
 
+# Paging/shape params that say nothing about what the call is for.
+_QUIET_PARAMS = {"limit", "offset", "order_by", "include_query_values"}
+
+
+def _describe_call(path: str, query: dict) -> str:
+    shown = ", ".join(f"{k}={v}" for k, v in query.items() if k not in _QUIET_PARAMS)
+    return f"{path} ({shown})"[:240] if shown else path
+
+
+def _estimate_credits(endpoint_key: str, query: dict) -> int:
+    """Rough cost shown to the user before they approve: a company report is 1 credit
+    per section, everything else 1 per call (README's credit table)."""
+    if endpoint_key == "company_report":
+        return max(1, len(str(query.get("sections", "")).split(",")))
+    return 1
+
+
 class SectorsClient:
     def __init__(
         self,
@@ -130,6 +148,10 @@ class SectorsClient:
 
         if self._cache is not None and self._cache.is_negative_cached(negative_cache_key):
             raise SectorsNotFoundError(404, f"negative-cached: {path}")
+
+        gate = credit_gate.current_gate()
+        if gate is not None:
+            gate.check(_describe_call(path, query), _estimate_credits(endpoint_key, query))
 
         self._rate_limiter.acquire()
         response = self._http.get(path, params=query)
