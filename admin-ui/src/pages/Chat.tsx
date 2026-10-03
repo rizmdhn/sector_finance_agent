@@ -2,9 +2,10 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import { listPendingApprovals, resolveApproval, type ApprovalDecision, type PendingApproval } from "../api/approvals";
 import { createSession, deleteSession, listSessions, sendMessage, setMessageCredits } from "../api/chat";
 import { fetchTraceWhenReady } from "../api/traces";
-import { ApiError } from "../api/client";
+import { GATEWAY_DOWN, ProblemError, type Problem } from "../api/problems";
 import { ROLES } from "../api/modelTiers";
 import { Markdown } from "../markdown";
+import ProblemPanel from "../ProblemPanel";
 import TracePanel from "../TracePanel";
 import type { ChatMessage, ChatSession } from "../types";
 
@@ -71,7 +72,8 @@ export default function Chat({ userId }: { userId: string }) {
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
   const [loading, setLoading] = useState(true);
-  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendProblem, setSendProblem] = useState<Problem | null>(null);
+  const lastQuestion = useRef("");
   const [askApproval, setAskApproval] = useState(readAskApproval);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -158,7 +160,7 @@ export default function Chat({ userId }: { userId: string }) {
   function handleNewChat() {
     setActiveId(null);
     setDraft("");
-    setSendError(null);
+    setSendProblem(null);
     setDrawerOpen(false);
     setTraceId(null);
   }
@@ -166,7 +168,7 @@ export default function Chat({ userId }: { userId: string }) {
   function handleOpen(id: string) {
     setTraceId(null);
     setActiveId(id);
-    setSendError(null);
+    setSendProblem(null);
     setDrawerOpen(false);
   }
 
@@ -181,7 +183,8 @@ export default function Chat({ userId }: { userId: string }) {
     const text = draft.trim();
     if (!text || sending) return;
     setDraft("");
-    setSendError(null);
+    setSendProblem(null);
+    lastQuestion.current = text;
 
     // The first message of a new chat is what creates the session.
     let sessionId = activeId;
@@ -222,11 +225,14 @@ export default function Chat({ userId }: { userId: string }) {
       // The user's message is already saved (sendMessage pushes it before the
       // network call) — reload so the bubble shows even though the reply failed.
       setSessions(await listSessions(userId));
-      if (err instanceof ApiError && err.status === 429) {
-        setSendError("Rate limited — wait a moment and try again.");
-      } else {
-        setSendError("Could not reach the gateway.");
-      }
+      // A TypeError from fetch() means the request never got an answer at all.
+      setSendProblem(
+        err instanceof ProblemError
+          ? err.problem
+          : err instanceof TypeError
+            ? GATEWAY_DOWN
+            : { code: "unexpected_error", title: "Something went wrong", detail: String(err), fix: "Try again." }
+      );
     } finally {
       abortRef.current = null;
       setSending(false);
@@ -461,7 +467,17 @@ export default function Chat({ userId }: { userId: string }) {
           </div>
 
           <div className="chat-composer-wrap">
-            {sendError && <p className="status-line status-line--error chat-send-error">{sendError}</p>}
+            {sendProblem && (
+              <ProblemPanel
+                problem={sendProblem}
+                retryLabel="Put my question back"
+                onRetry={() => {
+                  setDraft(lastQuestion.current);
+                  setSendProblem(null);
+                  inputRef.current?.focus();
+                }}
+              />
+            )}
             <form className="chat-composer" onSubmit={handleSend}>
               <textarea
                 ref={inputRef}

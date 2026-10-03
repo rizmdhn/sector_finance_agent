@@ -15,7 +15,9 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            sectors_api_key=os.environ["SECTORS_API_KEY"],
+            # Blank (not KeyError) so a missing key surfaces as a readable "Sectors rejected the
+            # API key" screen in the UI instead of crashing the whole gateway at import.
+            sectors_api_key=os.environ.get("SECTORS_API_KEY", ""),
             # `.get(key, default)` only falls back when the key is ABSENT, not when
             # it's present-but-blank — `.env.example` ships SECTORS_API_BASE_URL=
             # (blank, "everything else can stay as-is" per the README), so

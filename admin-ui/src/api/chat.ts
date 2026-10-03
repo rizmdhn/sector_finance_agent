@@ -16,7 +16,7 @@
 // real question showed one `step` chunk ~7s before any content arrived, exactly
 // the gap the old non-streaming request left blank.
 
-import { ApiError } from "./client";
+import { ProblemError, problemFromResponse, type Problem } from "./problems";
 import type { ChatMessage, ChatSession } from "../types";
 
 const STORAGE_KEY = "idx-admin-ui.chat-sessions.v1";
@@ -27,7 +27,7 @@ const SESSION_HEADER = "X-Session-Id";
 const CHAT_MODEL = "idx-analyst-claude";
 
 interface CompletionChunk {
-  choices: { delta: { content?: string; step?: string; trace_id?: string } }[];
+  choices: { delta: { content?: string; step?: string; trace_id?: string; error?: Problem } }[];
 }
 
 function loadSessions(): ChatSession[] {
@@ -125,7 +125,7 @@ export async function sendMessage(
   });
   if (!response.ok || !response.body) {
     const body = await response.text().catch(() => "");
-    throw new ApiError(response.status, body || response.statusText);
+    throw new ProblemError(problemFromResponse(response.status, body));
   }
 
   const reader = response.body.getReader();
@@ -158,6 +158,7 @@ export async function sendMessage(
         if (raw === "[DONE]") continue;
         const chunk = JSON.parse(raw) as CompletionChunk;
         const delta = chunk.choices[0]?.delta ?? {};
+        if (delta.error) throw new ProblemError(delta.error);
         if (delta.trace_id) traceId = delta.trace_id;
         if (delta.step) onStep?.(delta.step);
         if (delta.content) {

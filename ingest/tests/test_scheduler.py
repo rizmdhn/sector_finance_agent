@@ -54,3 +54,26 @@ def test_non_rate_limit_failure_is_logged_not_retried_or_raised(monkeypatch):
 
     assert calls == [1]
     assert slept == []
+
+
+class _FakeCache:
+    def __init__(self):
+        self.data = {}
+
+    def set(self, key, value, ttl=None):
+        self.data[key] = value
+
+
+def test_failure_is_recorded_for_the_ui_with_a_readable_problem(monkeypatch):
+    monkeypatch.setattr("ingest.scheduler.time.sleep", lambda _s: None)
+    from data.sectors_client import SectorsAuthError
+
+    cache = _FakeCache()
+
+    def rejected():
+        raise SectorsAuthError(401, "bad key")
+
+    _run_bootstrap_job("symbol_master", rejected, cache)
+
+    status = cache.data["ingest:status:symbol_master"]
+    assert status["state"] == "failed" and status["problem"]["code"] == "sectors_key_invalid"

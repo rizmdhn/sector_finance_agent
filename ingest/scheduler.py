@@ -9,6 +9,7 @@ import time
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from data import ingest_status
 from data.deps import get_cache, get_client, get_db
 from data.sectors_client import SectorsRateLimitError
 from ingest.jobs import symbol_master, universe_close
@@ -31,23 +32,42 @@ TIMEZONE = "Asia/Jakarta"
 BOOTSTRAP_RETRY_DELAYS_SECONDS = [15, 60, 180]
 
 
-def _run_bootstrap_job(name: str, job) -> None:
+def _tracked(cache, name: str, job):
+    """Wraps a scheduled job so its outcome shows up in the UI (data/ingest_status.py).
+    Re-raises, so APScheduler still logs the failure as before."""
+
+    def run(*args):
+        try:
+            job(*args)
+        except Exception as exc:
+            ingest_status.record(cache, name, "failed", exc)
+            raise
+        ingest_status.record(cache, name, "ok")
+
+    return run
+
+
+def _run_bootstrap_job(name: str, job, cache=None) -> None:
     for attempt, delay in enumerate([0, *BOOTSTRAP_RETRY_DELAYS_SECONDS]):
         if delay:
             logger.warning("%s bootstrap hit Sectors' rate limit — retrying in %ss", name, delay)
+            ingest_status.record(cache, name, "retrying", note=f"Rate limited by Sectors — retrying in {delay}s")
             time.sleep(delay)
         try:
             job()
+            ingest_status.record(cache, name, "ok")
             return
-        except SectorsRateLimitError:
+        except SectorsRateLimitError as exc:
             if attempt == len(BOOTSTRAP_RETRY_DELAYS_SECONDS):
+                ingest_status.record(cache, name, "failed", exc)
                 logger.warning(
                     "%s bootstrap still rate-limited after %d retries — will land on its "
                     "next regular schedule instead of crashing the worker",
                     name,
                     len(BOOTSTRAP_RETRY_DELAYS_SECONDS),
                 )
-        except Exception:
+        except Exception as exc:
+            ingest_status.record(cache, name, "failed", exc)
             # Not a rate limit (e.g. an empty sweep, a DB error): retrying won't help
             # and crashing the worker would just restart-loop it. Log the traceback
             # and carry on — _verify_landed() below reports the resulting state.
@@ -92,11 +112,11 @@ def build_scheduler() -> BlockingScheduler:
     # fights the project's own purpose for a feature nothing actually blocks on. It
     # arrives for free on the very next normal 16-19h WIB poll below instead.
     if not db.has_symbol_master():
-        _run_bootstrap_job("symbol_master", lambda: symbol_master.run_essential(db, client, cache))
+        _run_bootstrap_job("symbol_master", lambda: symbol_master.run_essential(db, client, cache), cache)
         _verify_landed(db)
 
     scheduler.add_job(
-        symbol_master.run,
+        _tracked(cache, "symbol_master", symbol_master.run),
         CronTrigger(day_of_week="mon", hour=3, minute=0, timezone=TIMEZONE),
         args=[db, cache, client],
         id="symbol_master_weekly",
@@ -105,7 +125,7 @@ def build_scheduler() -> BlockingScheduler:
     # IDX closes ~16:00-16:15 WIB; poll every 5 minutes until today's date lands.
     # TODO: confirm when daily data actually lands after close (plan doc section 8).
     scheduler.add_job(
-        universe_close.run,
+        _tracked(cache, "universe_close", universe_close.run),
         CronTrigger(hour="16-19", minute="*/5", timezone=TIMEZONE),
         args=[db, cache, client],
         id="universe_close_poll",

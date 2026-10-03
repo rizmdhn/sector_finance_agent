@@ -49,6 +49,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 from collections import defaultdict
@@ -108,6 +109,15 @@ def _event_text(events, name: str) -> str | None:
     return None
 
 
+def _io(row, events_name: str, attr: str) -> str | None:
+    """A span's tool arguments (`input.value`) / result (`output.value`). The gateway's span
+    converter (gateway/telemetry.py) rewrites Strands' spans to OpenInference and drops the
+    `gen_ai.tool.message` / `gen_ai.choice` events these used to live in, so read the
+    attributes first and fall back to the events for traces recorded before that."""
+    value = row.get(attr)
+    return value if isinstance(value, str) and value else _event_text(row.get("events"), events_name)
+
+
 def _json_schema(row) -> str | None:
     gen_ai = row.get("attributes.gen_ai")
     if isinstance(gen_ai, dict):
@@ -157,8 +167,13 @@ def _collect(df, chat_span_id: str):
     selections = []
     if not chief_span.empty:
         chief_id = chief_span.index[0]
-        chosen = tree[(tree["parent_id"] == chief_id) & tree["name"].str.startswith("execute_tool ", na=False)]
-        chosen_names = [n.removeprefix("execute_tool ") for n in chosen["name"]]
+        # Specialists are only ever called by the Chief, but their spans hang off its
+        # event-loop cycle, not off `invoke_agent chief` itself — match on tool name.
+        chosen_names = [
+            n.removeprefix("execute_tool ")
+            for n in tree.sort_values("start_time")["name"]
+            if isinstance(n, str) and n.removeprefix("execute_tool ") in SPECIALIST_TOOL_NAMES and n.startswith("execute_tool ")
+        ]
         if chosen_names:
             selections.append((chief_id, chosen_names))
 
@@ -179,8 +194,12 @@ def _collect(df, chat_span_id: str):
         specialist_id, specialist_row = _nearest_specialist_ancestor(tree, span_id)
 
         if specialist_row is not None:
-            task = _event_text(specialist_row.get("events"), "gen_ai.tool.message") or ""
-            specialist_output = _event_text(specialist_row.get("events"), "gen_ai.choice") or ""
+            task = _io(specialist_row, "gen_ai.tool.message", "attributes.input.value") or ""
+            try:  # the delegation's argument is {"input": "<task text>"} — show just the text
+                task = json.loads(task)["input"]
+            except (ValueError, KeyError, TypeError):
+                pass
+            specialist_output = _io(specialist_row, "gen_ai.choice", "attributes.output.value") or ""
             context_label = specialist_row["name"].removeprefix("execute_tool ")
         else:
             task = ""
@@ -202,8 +221,8 @@ def _collect(df, chat_span_id: str):
             f"This call was made by: {context_label}, working on: {task}.{trajectory}"
         )
 
-        args = _event_text(row.get("events"), "gen_ai.tool.message")
-        result = _event_text(row.get("events"), "gen_ai.choice")
+        args = _io(row, "gen_ai.tool.message", "attributes.input.value")
+        result = _io(row, "gen_ai.choice", "attributes.output.value")
         leaf_calls.append(
             {
                 "span_id": span_id,

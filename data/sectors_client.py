@@ -102,6 +102,10 @@ class SectorsRateLimitError(SectorsAPIError):
     pass
 
 
+class SectorsAuthError(SectorsAPIError):
+    """401/403 — the API key is wrong, expired or missing."""
+
+
 # Paging/shape params that say nothing about what the call is for.
 _QUIET_PARAMS = {"limit", "offset", "order_by", "include_query_values"}
 
@@ -164,6 +168,8 @@ class SectorsClient:
             raise SectorsNotFoundError(404, response.text)
         if response.status_code == 400:
             raise SectorsAPIError(400, response.text)
+        if response.status_code in (401, 403):
+            raise SectorsAuthError(response.status_code, response.text)
         if response.status_code == 429:
             # Real bug found live (2026-10-01): our own TokenBucket only self-throttles
             # to OUR guessed rate — it doesn't know Sectors' actual server-side limit,

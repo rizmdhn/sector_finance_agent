@@ -1,14 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Chat from "./pages/Chat";
 import Evals from "./pages/Evals";
 import Login from "./pages/Login";
 import Memory from "./pages/Memory";
 import ModelTiering from "./pages/ModelTiering";
 import { checkSession, logout } from "./api/auth";
+import { GATEWAY_DOWN } from "./api/problems";
 import { getReadiness, type ReadinessState } from "./api/readiness";
+import ProblemPanel from "./ProblemPanel";
 import "./styles.css";
 
 const READINESS_POLL_MS = 5000;
+// One missed poll is a blip; this many in a row means the gateway is really not answering.
+const GATEWAY_DOWN_AFTER_FAILURES = 2;
 
 // price_data_ready is intentionally excluded here — gateway/main.py's
 // get_readiness() doesn't require it for `ready` either. Every price-dependent
@@ -68,6 +72,8 @@ export default function App() {
   const [themeChoice, setThemeChoice] = useState<Theme | null>(readThemeChoice);
   const theme: Theme = themeChoice ?? systemTheme();
   const [readiness, setReadiness] = useState<ReadinessState | null>(null);
+  const [gatewayDown, setGatewayDown] = useState(false);
+  const pollFailures = useRef(0);
   const [tab, setTab] = useState<Tab>(readTab);
   useEffect(() => {
     location.hash = tab;
@@ -75,9 +81,16 @@ export default function App() {
   const [userId, setUserIdState] = useState(readUserId);
   const [userDraft, setUserDraft] = useState(userId);
 
-  useEffect(() => {
-    checkSession().then(setAuthed);
-  }, []);
+  function verifySession() {
+    checkSession()
+      .then((ok) => {
+        setGatewayDown(false);
+        setAuthed(ok);
+      })
+      .catch(() => setGatewayDown(true));
+  }
+
+  useEffect(verifySession, []);
 
   // Poll until the fresh-deploy data seed (ingest/scheduler.py) has landed,
   // rather than letting the user into a Chat screen where every ticker looks
@@ -88,9 +101,16 @@ export default function App() {
     async function poll() {
       try {
         const state = await getReadiness();
-        if (!cancelled) setReadiness(state);
+        pollFailures.current = 0;
+        if (!cancelled) {
+          setReadiness(state);
+          setGatewayDown(false);
+        }
       } catch {
-        // transient — keep the last known state and retry on the next tick
+        // A single failure is transient — keep the last state and retry on the next
+        // tick; several in a row means the gateway is down, say so.
+        pollFailures.current += 1;
+        if (!cancelled && pollFailures.current >= GATEWAY_DOWN_AFTER_FAILURES) setGatewayDown(true);
       }
     }
     poll();
@@ -127,6 +147,16 @@ export default function App() {
     setAuthed(false);
   }
 
+  if (gatewayDown) {
+    return (
+      <div className="setup-screen">
+        <div className="setup-card">
+          <ProblemPanel problem={GATEWAY_DOWN} retryLabel="Check again" onRetry={verifySession} />
+        </div>
+      </div>
+    );
+  }
+
   if (authed === null) {
     return <div className="auth-loading">Loading…</div>;
   }
@@ -151,13 +181,14 @@ export default function App() {
                 <li key={key} className={done ? "setup-item setup-item--done" : "setup-item"}>
                   <span className="setup-item-dot" />
                   {BLOCKING_READINESS_LABEL[key]}
-                  {key === "model_key_ready" && !done && (
-                    <span className="setup-item-note"> — add ANTHROPIC_API_KEY or OPENAI_API_KEY to .env</span>
-                  )}
                 </li>
               );
             })}
           </ul>
+          {readiness?.ingest_note && <p className="setup-note">{readiness.ingest_note}</p>}
+          {readiness?.problems
+            .filter((problem) => problem.blocking)
+            .map((problem) => <ProblemPanel key={problem.code} problem={problem} />)}
         </div>
       </div>
     );
@@ -165,6 +196,13 @@ export default function App() {
 
   return (
     <div className="shell">
+      {readiness.problems
+        .filter((problem) => !problem.blocking)
+        .map((problem) => (
+          <div key={problem.code} className="problem-banner" role="alert">
+            <b>{problem.title}.</b> {problem.fix}
+          </div>
+        ))}
       {!readiness.price_data_ready && (
         <div className="price-data-banner">
           Recent price history hasn't landed yet — it's pulled once a day after market close (~16:00-19:00 WIB), not

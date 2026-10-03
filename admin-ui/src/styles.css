@@ -1843,3 +1843,78 @@
     box-shadow: var(--shadow);
   }
 }
+
+/* ---- Problems: one look for every error the user can act on ---- */
+.problem-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 760px;
+  margin: 8px auto;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, #dc2626 45%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, #dc2626 7%, var(--bg));
+  text-align: left;
+  font-size: 14px;
+}
+
+.problem-title {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.problem-detail {
+  margin: 0;
+}
+
+.problem-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.problem-fix code {
+  overflow-wrap: anywhere;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--code-bg);
+  font-size: 12px;
+  color: var(--text-h);
+}
+
+.problem-retry {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-h);
+  cursor: pointer;
+}
+
+.problem-retry:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.problem-banner {
+  padding: 8px 16px;
+  border-bottom: 1px solid color-mix(in srgb, #dc2626 45%, var(--border));
+  background: color-mix(in srgb, #dc2626 8%, var(--bg));
+  font-size: 13px;
+  color: var(--text-h);
+}
+
+.setup-note {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.setup-card .problem-card {
+  margin: 12px 0 0;
+}

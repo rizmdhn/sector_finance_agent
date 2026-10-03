@@ -4,6 +4,7 @@ See idx_agent_infrastructure_diagrams_md.md sections 2-4.
 """
 
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -27,7 +28,8 @@ from gateway.guardrails import (
 from gateway.registry import PLACEHOLDER_MODEL_ID, has_usable_key, load_registry
 from gateway.roles.orchestrator import DEFAULT_ROLE_TIERS, resolve_role_tiers
 from gateway.telemetry import setup_telemetry, traced_conversation
-from data import credit_gate
+from data import credit_gate, ingest_status
+from data.problems import describe
 from data.deps import get_cache, get_db
 from data.memory_store import write_memory
 from data.session_repository import ValkeySessionRepository
@@ -57,6 +59,7 @@ setup_telemetry()
 app = FastAPI(title="IDX Agent Gateway", telemetry={"tracing": False})
 _auth_scheme = HTTPBearer()
 
+logger = logging.getLogger(__name__)
 _registry = load_registry()
 _approvals = ApprovalBroker()
 
@@ -69,17 +72,12 @@ def _validate_startup_config() -> None:
     NOT EXISTS throughout) so a fresh database doesn't need the README's manual
     `init-db` step either.
     """
-    missing = [key for key in ("SECTORS_API_KEY", "IDX_GATEWAY_KEY") if not os.environ.get(key)]
-    if missing:
-        raise RuntimeError(
-            f"Missing required environment variable(s): {', '.join(missing)}. "
-            "Set them in your .env file before starting the gateway."
-        )
-    if not any(has_usable_key(entry) for entry in _registry.values()):
-        raise RuntimeError(
-            "No usable model API key configured — set ANTHROPIC_API_KEY and/or "
-            "OPENAI_API_KEY in your .env file."
-        )
+    # Only the gateway's own key is fatal: without it no request can authenticate, so
+    # there'd be no way to show anything. Missing SECTORS_API_KEY / model keys no longer
+    # crash the process — /v1/admin/readiness reports them so the UI can say exactly what
+    # to fix instead of the user seeing a dead page.
+    if not os.environ.get("IDX_GATEWAY_KEY"):
+        raise RuntimeError("Missing required environment variable IDX_GATEWAY_KEY. Set it in your .env file.")
     get_db().init_schema()
 
 
@@ -215,7 +213,10 @@ async def chat_completions(request: Request):
         _approvals.gate_for(session_id) if request.headers.get(APPROVAL_MODE_HEADER, "").lower() == "ask" else None
     )
 
-    agent = _build_agent_with_fallback(model_entry, user_id=user_id, session_id=session_id)
+    try:
+        agent = _build_agent_with_fallback(model_entry, user_id=user_id, session_id=session_id)
+    except Exception as exc:
+        return _problem_response(exc)
     if system_prompt:
         agent.system_prompt = f"{agent.system_prompt}\n\n{system_prompt}"
 
@@ -235,11 +236,14 @@ async def chat_completions(request: Request):
         return response
 
     credit_gate.set_gate(approval_gate)
-    with traced_conversation(question, model_name, user_id, session_id) as span:
-        text = await _run_to_completion(agent, strands_messages)
-        answer = attach_disclaimer(text)
-        span.set_output(answer)
-        trace_id = span.trace_id
+    try:
+        with traced_conversation(question, model_name, user_id, session_id) as span:
+            text = await _run_to_completion(agent, strands_messages)
+            answer = attach_disclaimer(text)
+            span.set_output(answer)
+            trace_id = span.trace_id
+    except Exception as exc:
+        return _problem_response(exc)
     return JSONResponse(
         compat.completion_response(compat.completion_id(), model_name, answer),
         headers={SESSION_HEADER: session_id, TRACE_HEADER: trace_id},
@@ -247,6 +251,20 @@ async def chat_completions(request: Request):
             memory_extraction.maybe_extract, get_db(), user_id, session_id, question, {"answer": answer}
         ),
     )
+
+
+# Missing/rejected keys and an unreachable database are the operator's to fix (503); a
+# provider or Sectors rate limit is 429; everything else upstream is a 502.
+_CONFIG_PROBLEMS = {"model_key_missing", "model_key_invalid", "sectors_key_invalid", "model_out_of_credit",
+                    "database_unavailable", "cache_unavailable"}
+_RATE_PROBLEMS = {"model_rate_limited", "sectors_rate_limited"}
+
+
+def _problem_response(exc: Exception) -> JSONResponse:
+    logger.exception("chat request failed")
+    problem = describe(exc)
+    status = 503 if problem.code in _CONFIG_PROBLEMS else 429 if problem.code in _RATE_PROBLEMS else 502
+    return JSONResponse({"error": problem.as_dict()}, status_code=status)
 
 
 def _build_agent_with_fallback(model_entry, *, user_id: str, session_id: str):
@@ -306,18 +324,27 @@ async def _stream_response(
     # and the gate must be set in the context where the agent (and so its tool
     # threads) actually runs.
     credit_gate.set_gate(approval_gate)
-    with traced_conversation(question, model_name, user_id, session_id) as span:
-        # Non-standard field like `step`: lets the UI link this reply to its Phoenix trace.
-        yield compat.sse_chunk(completion_id_, model_name, {"trace_id": span.trace_id})
-        async for event in agent.stream_async(prompt=messages):
-            tool_name = (event.get("current_tool_use") or {}).get("name")
-            if tool_name and tool_name != last_step:
-                last_step = tool_name
-                yield compat.sse_chunk(completion_id_, model_name, {"step": tool_name})
-            if "data" in event and event["data"]:
-                chunks.append(event["data"])
-                yield compat.sse_chunk(completion_id_, model_name, {"content": event["data"]})
-        span.set_output("".join(chunks))
+    try:
+        with traced_conversation(question, model_name, user_id, session_id) as span:
+            # Non-standard field like `step`: lets the UI link this reply to its Phoenix trace.
+            yield compat.sse_chunk(completion_id_, model_name, {"trace_id": span.trace_id})
+            async for event in agent.stream_async(prompt=messages):
+                tool_name = (event.get("current_tool_use") or {}).get("name")
+                if tool_name and tool_name != last_step:
+                    last_step = tool_name
+                    yield compat.sse_chunk(completion_id_, model_name, {"step": tool_name})
+                if "data" in event and event["data"]:
+                    chunks.append(event["data"])
+                    yield compat.sse_chunk(completion_id_, model_name, {"content": event["data"]})
+            span.set_output("".join(chunks))
+    except Exception as exc:
+        logger.exception("streamed chat request failed")
+        # The stream already started, so the status line can't change — send the problem
+        # in-band (like `step`/`trace_id`) and let the UI render it.
+        result["answer"] = "".join(chunks)
+        yield compat.sse_chunk(completion_id_, model_name, {"error": describe(exc).as_dict()}, finish_reason="stop")
+        yield compat.sse_done()
+        return
     result["answer"] = "".join(chunks)
     yield compat.sse_chunk(completion_id_, model_name, {}, finish_reason="stop")
     yield compat.sse_done()
@@ -478,15 +505,57 @@ def get_readiness() -> dict:
     usable model key are real blockers — gating on price data too would hold the
     UI back over something the rest of the system already handles gracefully.
     """
-    db = get_db()
-    symbol_master_ready = db.has_symbol_master()
-    price_data_ready = db.latest_trade_date() is not None
     model_key_ready = any(has_usable_key(entry) for entry in _registry.values())
+    try:
+        db = get_db()
+        symbol_master_ready = db.has_symbol_master()
+        price_data_ready = db.latest_trade_date() is not None
+    except Exception as exc:
+        problem = {**describe(exc).as_dict(), "blocking": True}
+        return {"ready": False, "symbol_master_ready": False, "price_data_ready": False,
+                "model_key_ready": model_key_ready, "problems": [problem], "ingest_note": None}
+
+    problems: list[dict] = []
+    if not model_key_ready:
+        problems.append({
+            "code": "model_key_missing", "title": "No model API key", "blocking": True,
+            "detail": "The chat needs a language model, and neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set.",
+            "fix": "Add one of them to your .env file, then run: docker compose up -d agent-gateway",
+        })
+    if not os.environ.get("SECTORS_API_KEY"):
+        problems.append({
+            "code": "sectors_key_missing", "title": "SECTORS_API_KEY is missing",
+            "blocking": not symbol_master_ready,
+            "detail": "Without it the ticker list can't be loaded and no new company data can be fetched.",
+            "fix": "Add SECTORS_API_KEY to your .env file, then run: docker compose up -d",
+        })
+
+    # What the ingest worker last did (data/ingest_status.py) — turns an endless
+    # "setting up…" into the actual reason a job failed.
+    note = None
+    try:
+        cache = get_cache()
+        for job, label in (("symbol_master", "Ticker list"), ("universe_close", "Daily prices")):
+            status = ingest_status.read(cache, job)
+            if not status:
+                continue
+            if status["state"] == "retrying" and job == "symbol_master" and not symbol_master_ready:
+                note = status["note"]
+            if status["state"] == "failed" and status.get("problem") and all(
+                p["code"] != status["problem"]["code"] for p in problems
+            ):
+                problems.append({**status["problem"], "title": f"{label}: {status['problem']['title']}",
+                                 "blocking": job == "symbol_master" and not symbol_master_ready})
+    except Exception as exc:
+        problems.append({**describe(exc).as_dict(), "blocking": False})
+
     return {
         "ready": symbol_master_ready and model_key_ready,
         "symbol_master_ready": symbol_master_ready,
         "price_data_ready": price_data_ready,
         "model_key_ready": model_key_ready,
+        "problems": problems,
+        "ingest_note": note,
     }
 
 

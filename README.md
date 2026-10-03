@@ -379,3 +379,15 @@ bugs found and fixed, open items).
 ## Reply trace
 
 Each assistant reply has a **Trace · N credits** chip. It opens a drawer listing the agents consulted, tools called, model calls, tokens, time and Sectors credits spent, with an "Open in Phoenix" link. The data is read back from Phoenix (`GET /v1/admin/traces/{id}`), so it can take a few seconds to appear after a reply. Set `PHOENIX_PUBLIC_URL` if Phoenix isn't at `http://localhost:6006` from your browser. Red rows are failed or declined calls.
+
+## When something is wrong
+
+The admin UI explains failures instead of showing a blank page, each with what to do next:
+
+- **Can't reach the gateway** — the UI couldn't get an answer (stopped or crashed). It recovers by itself once the gateway is back.
+- **Setup screen** — lists a missing model key, a missing or rejected `SECTORS_API_KEY`, a database problem, or why the first ticker load failed (e.g. rate limited, key rejected).
+- **Banner on top** — a background job failed (e.g. the daily price pull) but the app still works.
+- **In chat** — a rejected or out-of-credit model key, a model or Sectors rate limit, an unreachable provider, database or cache down; "Put my question back" restores what you typed.
+
+Only a missing `IDX_GATEWAY_KEY` still stops the gateway from starting. The ingest worker records each job's last result in Valkey (`ingest:status:*`), which is what the UI reads.
+
