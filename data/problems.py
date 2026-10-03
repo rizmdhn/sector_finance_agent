@@ -45,8 +45,16 @@ def describe(exc: BaseException) -> Problem:
             return Problem("model_key_missing", f"{key} is missing", f"The model needs {key}, which isn't set.",
                            f"Add {key} to your .env file, then run: docker compose up -d agent-gateway")
         if _named(e, "SectorsAuthError"):
+            # 401 is also what Sectors sends when the key is fine but the plan lacks an
+            # endpoint ("SUBSCRIPTION_DOES_NOT_ALLOW", seen live on close/) — blaming the
+            # key there sent the user to check a correct .env.
+            if "subscription_does_not_allow" in text:
+                return Problem("sectors_plan_limit", "Your Sectors plan doesn't include this data",
+                               "The API key works, but Sectors says the current subscription doesn't allow this request.",
+                               "Check your plan at sectors.app (or contact them) — nothing to change in .env. "
+                               "Data from other endpoints keeps working.")
             return Problem("sectors_key_invalid", "Sectors rejected the API key",
-                           "Sectors answered 401/403, so no company data can be fetched.",
+                           f"Sectors answered: {str(e)[:200]}",
                            "Check SECTORS_API_KEY in .env (no quotes or spaces), then restart: docker compose up -d")
         if _named(e, "SectorsRateLimitError"):
             return Problem("sectors_rate_limited", "Sectors rate limit reached",

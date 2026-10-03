@@ -23,3 +23,8 @@ def test_wrapped_cause_is_found_and_unknown_falls_back():
     wrapper.__cause__ = AuthenticationError("401")
     assert describe(wrapper).code == "model_key_invalid"
     assert describe(ValueError("boom")).code == "unexpected_error"
+
+
+def test_plan_limit_is_not_blamed_on_the_key():
+    body = '{"error":"SUBSCRIPTION_DOES_NOT_ALLOW","message":"Your current subscription does not allow this request."}'
+    assert describe(SectorsAuthError(401, body)).code == "sectors_plan_limit"
