@@ -6,4 +6,10 @@ __pycache__/
 .DS_Store
 .playwright-mcp
 .claude
+snapshot_registry_draft.md
+sectors_idx_ingest_cache_plan_md.md
+PROGRESS.md
+portfolio-intelligence-data-gap-analysis-v1.md
+portfolio-intelligence-business-requirements-v1.1.md
+idx_agent_infrastructure_diagrams_md.md
 PROGRESS.md
