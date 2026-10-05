@@ -5,10 +5,13 @@ gateway/tools/*.py call these, not SectorsClient directly, so the CACHE / INGEST
 LAZY-ATOMIC decision lives in one place per data kind.
 """
 
-from datetime import date, timedelta
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 
 from data.cache import EPOCH_FUND, EPOCH_PRICE, Cache
 from data.canonical import (
+    IDX_TIMEZONE,
     cache_key,
     canonicalize_screener_query,
     canonicalize_symbol,
@@ -16,6 +19,8 @@ from data.canonical import (
     screener_field_classes,
 )
 from data.db import Database
+from data.credit_gate import SectorsCallDenied
+from data.problems import describe
 from data.sectors_client import SectorsClient
 
 # Confirmed live (2026-09-24) against company/report/{symbol}/: the real section
@@ -253,6 +258,59 @@ def ensure_price_detail(db: Database, client: SectorsClient, symbol: str) -> Non
             for r in rows
         ]
     )
+
+
+PRICE_REFRESH_MARKER_TTL_SECONDS = 24 * 60 * 60
+
+
+def expected_last_close_date(now: datetime | None = None) -> date:
+    """The trading date whose close should already be available: today once the evening
+    poll window (16:00-19:00 WIB) is over, otherwise the previous weekday.
+    ponytail: no IDX holiday calendar, so on a holiday this expects a close that never
+    comes — the once-per-day marker in refresh_stale_prices keeps that to one wasted
+    credit per symbol per day. Add a calendar if that shows up as real spend."""
+    now = now or datetime.now(IDX_TIMEZONE)
+    day = now.date() if now.hour >= 19 else now.date() - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def refresh_stale_prices(db: Database, cache: Cache, client: SectorsClient, symbols: list[str]) -> dict:
+    """Fetch prices for symbols whose newest stored close is older than expected (or that
+    have none): 1 credit per symbol via ensure_price_detail, asked through the credit
+    gate like any other Sectors call. At most one attempt per symbol per day, so a
+    holiday or a declined call doesn't repeat. Failures are reported, never raised —
+    the caller still values what it has and says what is stale.
+
+    Returns {"fetched": [symbols], "failed": {symbol: reason}}.
+    """
+    expected = expected_last_close_date()
+    today = idx_today().isoformat()
+    stale = []
+    for symbol in symbols:
+        latest = db.get_latest_close(symbol)
+        if (latest is None or latest[0] < expected) and not cache.get(f"price_refresh:{symbol}:{today}"):
+            stale.append(symbol)
+
+    result: dict = {"fetched": [], "failed": {}}
+    if not stale:
+        return result
+    # Parallel so every waiting call shows up in ONE approval card instead of one prompt
+    # per symbol; each submit gets its own copy of the context so the gate follows it.
+    with ThreadPoolExecutor(max_workers=min(len(stale), 5)) as pool:
+        futures = {
+            symbol: pool.submit(contextvars.copy_context().run, ensure_price_detail, db, client, symbol)
+            for symbol in stale
+        }
+    for symbol, future in futures.items():
+        exc = future.exception()
+        if exc is None:
+            cache.set(f"price_refresh:{symbol}:{today}", 1, ttl=PRICE_REFRESH_MARKER_TTL_SECONDS)
+            result["fetched"].append(symbol)
+        else:
+            result["failed"][symbol] = "you declined the call" if isinstance(exc, SectorsCallDenied) else describe(exc).title
+    return result
 
 
 # -- Broker activity per symbol: LAZY-ATOMIC, past days never expire ---------

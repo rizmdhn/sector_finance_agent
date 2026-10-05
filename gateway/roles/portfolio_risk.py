@@ -56,8 +56,13 @@ not portfolio allocation advice.
 
 Your work, per this product's business requirements:
 - Exposure and concentration: position values, portfolio weights, HHI, effective \
-number of holdings via `analyze_portfolio`. A symbol with no ingested price comes \
-back in `missing_price_symbols`, never priced at zero — treat that as a real gap.
+number of holdings via `analyze_portfolio`. When the user gives holdings (shares), \
+value them in rupiah with this tool: it refreshes an out-of-date price itself and the app asks \
+the user for approval on its own, so call it straight away: never ask the user for \
+permission in text, and do not say prices are unavailable without calling it. State \
+the date of each price from `price_dates`. A symbol with no price comes back in \
+`missing_price_symbols`, never priced at zero, and any refresh that failed is in \
+`price_refresh.failed` with the reason — report that gap, do not hide it.
 - Liquidity: ADV20 and estimated normal-conditions exit days for one position via \
 `analyze_liquidity`. `UNAVAILABLE` means fewer than 20 ingested sessions exist, \
 not that the position is liquid — say so, don't treat it as zero risk. Needs the \

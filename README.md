@@ -183,7 +183,7 @@ prompts say the same, so an agent doesn't claim coverage it lacks.
 |---|---|---|---|
 | **Chief Portfolio Intelligence Orchestrator** | none (delegates + memory) | Decides which specialists a question needs, combines their findings, keeps hedges instead of turning them into settled fact | n/a |
 | **Investment Research Lead** (`gateway/roles/investment_research.py`) | `get_company_report`, `get_price_history`, `analyze_fundamentals`, `analyze_ownership`, `screen_companies` | Company economics, financial quality, valuation, ownership composition (local/foreign split, free float %), one company at a time | Named major shareholders or a controlling-group mapping (no data source provides this); thesis monitoring against a recorded thesis |
-| **Portfolio Risk Lead** (`gateway/roles/portfolio_risk.py`) | `analyze_portfolio`, `analyze_liquidity` (optionally with free-float capacity), `analyze_returns` (Postgres only, plus one 1-credit lookup for free-float capacity) | Exposure and concentration, exit liquidity for one position, free-float capacity | Covariance, stress tests, benchmark comparison; no direct access to mandate limits (the Chief pairs those from memory) |
+| **Portfolio Risk Lead** (`gateway/roles/portfolio_risk.py`) | `analyze_portfolio`, `analyze_liquidity` (optionally with free-float capacity), `analyze_returns` (Postgres, plus a 1-credit lookup for free-float capacity or for a stale price) | Exposure and concentration, exit liquidity for one position, free-float capacity | Covariance, stress tests, benchmark comparison; no direct access to mandate limits (the Chief pairs those from memory) |
 | **Market and Event Intelligence Lead** (`gateway/roles/market_intelligence.py`) | price and volume moves, foreign flow, broker activity, filings, corporate actions, news, `analyze_index` | Descriptive "what moved and why", plus what is inside an index (LQ45, IDX30, KOMPAS100, ...) and how its members moved | No significance test for "unusual"; the `symbol` and `date` filters on filings, news and foreign flow are unconfirmed |
 | **Independent Risk and Evidence Officer** (`gateway/roles/independent_risk_officer.py`) | the same data tools as the other three, so it can reproduce a calculation | Reviews a draft answer's evidence and calculations and returns PASS / PASS WITH LIMITATIONS / REVISE / DATA BLOCKED / HUMAN ESCALATION | The most expensive step per question, so the Chief calls it selectively |
 
@@ -211,6 +211,14 @@ Two stores with different lifetimes:
   `data/memory_store.py`'s `PostgresUserMemoryStore` gives the Chief its `search_memory`
   and `add_memory` tools. Entries are free-form text with no fixed schema. Full CRUD is
   available at `/v1/memory` and in the Memory screen, scoped per user.
+
+  **Holdings are one saved portfolio, not loose notes.** When you say what you hold, the
+  Chief saves it with `set_portfolio`. When you later say you bought or sold, it applies
+  `record_trades` to the saved holdings and replaces the record, so the Memory screen
+  always shows one current portfolio (older versions are kept as invalid, not deleted).
+  Editing that entry's text in the Memory screen doesn't change the numbers; tell the
+  agent instead. Summaries and extracted facts deliberately leave out holdings and
+  prices, because those go stale.
 
   **Automatic extraction is opt-in per user** (`PATCH /v1/memory/settings`, or the
   toggle in the Memory screen) and off by default. When off, memory only costs
@@ -317,7 +325,8 @@ Sectors charges about 1 credit per report *section*, not per call:
 | `backfill-price <symbol>` | `daily/{symbol}/` | 1 credit | n/a, written to Postgres permanently |
 | `screen "<where>"` | `companies/` | 1 credit per distinct query | 0 for an identical repeat, until the TTL expires |
 | `run-job universe_close` (whole market) | `close/`, paginated | about 33 credits (962 symbols ÷ 30 per page) | shared across every symbol and user; run once a day |
-| `analyze-portfolio` / `-liquidity` / `-returns` | Postgres only | **0** | **0**, never calls the Sectors API |
+| `analyze-liquidity` / `-returns` | Postgres only | **0** | **0**, never calls the Sectors API |
+| `analyze-portfolio` / `analyze_portfolio` tool | Postgres; for a symbol whose stored close is out of date, `daily/{symbol}/` | **0** if prices are current, otherwise 1 credit per stale symbol (the agent asks first) | 0 after that, at most one refresh per symbol per day. The CLI never refreshes |
 | `analyze_index` (agent tool, e.g. `lq45`) | none; membership is `symbol_master.indices`, filled by the ticker sweep | **0** | **0**, member prices are a free Postgres read. An existing database needs one sweep to fill it (`python -m ingest.cli seed`, about 5 credits, or the Monday run) |
 | `analyze_ownership` (agent tool) | `company/shareholders-composition/{symbol}` | 1 credit | 0, until the symbol's data version changes |
 | `analyze_liquidity` with `position_shares` (free-float capacity) | same endpoint, for shares outstanding | 1 credit the first time per symbol | 0 after that; free float % itself is a free weekly Postgres read |
