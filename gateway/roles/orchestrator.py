@@ -63,6 +63,7 @@ from data.cache import Cache
 from data.canonical import idx_today
 from data.db import Database
 from data.memory_store import PostgresUserMemoryStore
+from gateway.tools.portfolio_memory import build_portfolio_memory_tools
 from data.session_repository import ValkeySessionRepository
 from gateway.bounded_agent import BoundedAgent
 from gateway.registry import ModelEntry, build_model, select_for_tier
@@ -122,6 +123,10 @@ def resolve_role_tiers(db: Database, user_id: str) -> dict[str, str]:
 # says the data is merely "unavailable", hiding that it was never fetched at the
 # user's own request — seen live on the first approval test.
 _DECLINED_CALL_RULE = (
+    "\n\nNever ask the user, in text, for permission to fetch data or spend Sectors "
+    "credit (\"may I proceed?\", \"I need your approval\"). Just call the tool: the app "
+    "shows the user an approval card by itself, and the call waits for their answer. "
+    "Asking in text means the card never appears and nothing gets fetched."
     "\n\nIf a tool result says the user declined a Sectors API call (or no approval "
     "arrived), the data was NOT fetched because of that — say exactly that, never "
     '"unavailable" or "not accessible". Do not retry the call; offer to fetch it if '
@@ -216,6 +221,20 @@ research tools), and not routine back-and-forth with no lasting relevance.
 - Not searched automatically before every answer — check it yourself when a \
 question depends on something the user may have told you before (e.g. "how does \
 this fit my portfolio" needs their positions from memory first).
+- The user's holdings live in ONE saved portfolio, not in free-text memory: \
+`get_portfolio` reads it, `set_portfolio` replaces it when they state what they hold \
+("I hold 1000 BBCA and 500 BMRI", "I now have 150 BBCA" — list every ticker they own), \
+`record_trades` applies a change when they say they bought or sold ("I bought 100 \
+more BBCA", "sold all my TLKM"). For "sold half"/"sold all", call `get_portfolio` \
+first and work out the shares. Use shares (1 lot = 100 shares; say when you convert). \
+Never save holdings with `add_memory`.
+- Save it in the same turn as the valuation, not instead of it: update the portfolio \
+AND delegate to portfolio_risk_lead to price the NEW holdings. Say what changed (old \
+-> new) and that it was saved; the user can see it in the Memory screen.
+- When the user refers to "my portfolio"/"my holdings" without listing them, call \
+`get_portfolio` first and say which date it is from. If it returns nothing, ask for \
+the holdings instead of guessing. If a trade fails because it would sell more than \
+is saved, ask for their real holdings.
 
 Rules:
 - Never claim independent review occurred ("reviewed", "approved", "PASS") without \
@@ -335,6 +354,7 @@ def build_agent(
                 name=independent_risk_officer.name,
                 description=independent_risk_officer.description,
             ),
+            *build_portfolio_memory_tools(db, user_id),
         ],
         system_prompt=SYSTEM_PROMPT + today_context,
         session_manager=session_manager,

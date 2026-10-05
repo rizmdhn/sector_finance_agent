@@ -4,7 +4,8 @@
 that reads real data and feeds it into `analysis/*.py`.
 
 Two cost tiers here:
-  - `portfolio_snapshot`, `liquidity_snapshot`, `returns_snapshot` read only Postgres
+  - `portfolio_snapshot` (unless given `cache`/`client`, which lets it refresh stale
+    prices at 1 credit per symbol), `liquidity_snapshot`, `returns_snapshot` read only Postgres
     (`price_daily`, already ingested by `ingest/jobs/*.py` /
     `data/repositories.py::ensure_price_detail`) and never call `SectorsClient` —
     zero Sectors credits, however often they're called.
@@ -29,6 +30,7 @@ from data.repositories import (
     get_free_float,
     get_index_constituents,
     get_shareholders_composition,
+    refresh_stale_prices,
 )
 from data.sectors_client import SectorsClient
 
@@ -38,19 +40,36 @@ PRICE_LABEL_CAVEAT = (
 )
 
 
-def portfolio_snapshot(db: Database, positions: dict[str, float], cash: float) -> dict:
-    """`positions`: symbol -> shares held. Prices come from the latest ingested
-    close per symbol (`price_daily`). A symbol with no ingested price is reported in
-    `missing_price_symbols` rather than silently dropped or treated as zero, per
-    Appendix A's "missing prices for material positions block full-portfolio weights."
+def portfolio_snapshot(
+    db: Database,
+    positions: dict[str, float],
+    cash: float,
+    *,
+    cache: Cache | None = None,
+    client: SectorsClient | None = None,
+) -> dict:
+    """`positions`: symbol -> shares held. Prices come from the latest stored close per
+    symbol (`price_daily`). A symbol with no price is reported in `missing_price_symbols`
+    rather than silently dropped or treated as zero ("missing prices for material
+    positions block full-portfolio weights", Appendix A).
+
+    With `cache` and `client`, a symbol whose stored close is older than expected is
+    refreshed first (1 credit per symbol, through the approval gate — see
+    repositories.refresh_stale_prices). Without them this stays Postgres-only, zero
+    credits. `price_dates` says which day each price is from, so the answer can cite it.
     """
+    canonical_positions = {ensure_valid_symbol(db, symbol): shares for symbol, shares in positions.items()}
+    refresh = (
+        refresh_stale_prices(db, cache, client, list(canonical_positions)) if cache and client else None
+    )
     position_values: dict[str, Number] = {}
+    price_dates: dict[str, str | None] = {}
     missing_price_symbols: list[str] = []
 
-    for symbol, shares in positions.items():
-        canonical = ensure_valid_symbol(db, symbol)
+    for canonical, shares in canonical_positions.items():
         latest = db.get_latest_close(canonical)
         price: Number = float(latest[1]) if latest is not None else UNAVAILABLE
+        price_dates[canonical] = latest[0].isoformat() if latest is not None else None
         value = portfolio.position_value(shares, price)
         position_values[canonical] = value
         if is_missing(value):
@@ -72,6 +91,8 @@ def portfolio_snapshot(db: Database, positions: dict[str, float], cash: float) -
         "hhi": hhi_value,
         "effective_number_of_holdings": effective_holdings,
         "missing_price_symbols": missing_price_symbols,
+        "price_dates": price_dates,
+        "price_refresh": refresh,
     }
 
 

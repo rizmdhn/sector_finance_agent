@@ -416,6 +416,43 @@ class Database:
                 (memory_id, user_id),
             )
 
+    def get_active_portfolio(self, user_id: str) -> dict | None:
+        """The user's current structured portfolio (data/portfolio_memory.py): the newest
+        active `kind: portfolio` row that carries `positions` in its metadata."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT id, content, metadata, created_at FROM user_memory
+                WHERE user_id = %s AND status = 'active' AND metadata->>'kind' = 'portfolio'
+                  AND metadata ? 'positions'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+
+    def replace_portfolio(self, user_id: str, content: str, metadata: dict) -> dict:
+        """Insert the new portfolio row and retire every earlier one in the same
+        transaction (kept as `invalid`, not deleted, like consolidation's UPDATE) — so
+        there is never a moment with two live portfolios, or none. Also retires the old
+        free-text "Holdings as of ..." rows the agent used to save before this existed."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO user_memory (user_id, content, metadata) VALUES (%s, %s, %s)
+                RETURNING id, content, metadata, created_at
+                """,
+                (user_id, content, psycopg.types.json.Json(metadata)),
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE user_memory SET status = 'invalid'
+                WHERE user_id = %s AND status = 'active' AND id <> %s AND metadata->>'kind' = 'portfolio'
+                  AND (metadata ? 'positions' OR content LIKE 'Holdings as of%%')
+                """,
+                (user_id, row["id"]),
+            )
+            return row
+
     def get_summary_for_session(self, user_id: str, session_id: str) -> dict | None:
         """The one active `kind: summary` row tagged with this session_id, if any —
         data/memory_store.py::write_summary upserts against this instead of

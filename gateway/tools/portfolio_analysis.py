@@ -1,8 +1,9 @@
 """Portfolio/liquidity/returns/fundamentals tools backed by analysis/ +
 data/analysis_bridge.py.
 
-analyze_portfolio/analyze_liquidity/analyze_returns read only already-ingested
-Postgres data (never call SectorsClient) — zero Sectors API credits. analyze_
+analyze_liquidity/analyze_returns read only already-ingested Postgres data (never
+call SectorsClient) — zero Sectors API credits. analyze_portfolio does too unless a
+symbol's price is stale, then it refreshes that symbol (1 credit, asked first). analyze_
 fundamentals fetches the company report's financials section (CACHE strategy): 1
 credit per section on the first call for a symbol, free after that. See
 data/analysis_bridge.py's module docstring.
@@ -20,14 +21,18 @@ Period = Literal["1m", "3m", "1y"]
 
 @tool
 def analyze_portfolio(positions: dict[str, float], cash: float) -> dict:
-    """Calculate portfolio value, position/weight breakdown, and concentration (HHI,
-    effective number of holdings) for a set of IDX holdings.
+    """Value a set of IDX holdings in rupiah (shares x latest closing price) and
+    calculate position weights and concentration (HHI, effective number of holdings).
+    If a symbol's stored price is out of date this fetches it itself (1 Sectors credit
+    per symbol; the app asks the user for approval automatically, so just call this and
+    never ask in text first); `price_dates` gives the date of each price, so
+    cite it, and `price_refresh.failed` lists any price that could not be refreshed.
 
     Args:
         positions: Map of IDX ticker (e.g. "BBCA") to shares held.
         cash: Cash balance in the same currency as the priced positions.
     """
-    return analysis_bridge.portfolio_snapshot(get_db(), positions, cash)
+    return analysis_bridge.portfolio_snapshot(get_db(), positions, cash, cache=get_cache(), client=get_client())
 
 
 @tool
