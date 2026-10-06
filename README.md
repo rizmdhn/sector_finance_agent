@@ -13,6 +13,12 @@ a single-admin login and four screens: Chat, Memory, Model Tiering and Evals. Th
 gateway speaks the standard OpenAI-compatible API, so other
 OpenAI-compatible clients (LibreChat, for example) also work.
 
+## Demo
+
+![Demo: approval card, rupiah portfolio valuation, saved portfolio and trace](docs/demo.gif)
+
+The agent asks before spending Sectors credits, values a portfolio from the latest closing prices, remembers it, and shows a trace of every answer.
+
 ---
 
 ## Problem statement
