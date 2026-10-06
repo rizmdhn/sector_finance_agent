@@ -15,6 +15,44 @@ OpenAI-compatible clients (LibreChat, for example) also work.
 
 ---
 
+## Problem statement
+
+AI assistants for stock analysis commonly share four problems:
+
+- **Fragmented data.** Market data is spread across several sources.
+- **Unsourced answers.** Figures are given without a source or an as-of date.
+- **Unpredictable cost.** Each API call consumes credits, and the cost is visible only after the fact.
+- **Hallucination.** Without guardrails, a model can invent figures, answer questions it has no data for, or respond outside its intended domain.
+
+This project addresses them as follows:
+
+| Problem | Approach |
+|---|---|
+| Fragmented data | A Chief agent routes each question to four specialist agents. Valkey caches, Postgres stores, and the ingest worker refreshes data from the Sectors API. |
+| Unsourced answers | Every figure carries the as-of date returned by the tool. Portfolios are valued in IDR from the latest Sectors closing prices. Each reply has a trace of the agents, tools, tokens and credits used. |
+| Unpredictable cost | An approval card shows the estimated cost before any uncached Sectors call. Approval is decided server-side. Index membership questions (for example LQ45) are served from stored data at zero credits. |
+| Hallucination | Guardrails, described below. |
+
+## Guardrails
+
+| Guardrail | Behavior | Enforced by |
+|---|---|---|
+| Scope check | Questions outside IDX equities or the user's portfolio, and attempts to change the agent's role, are answered briefly with no tool call. | System prompt |
+| No forecasts | Requests for future prices or unreleased results are declined, since no data exists. Past and present parts of a mixed question are still answered. | System prompt |
+| Dated figures | Every figure states the as-of date returned by a tool. Prices are never described as real-time. | System prompt, evals |
+| Missing data disclosure | Declined calls are reported as "not fetched", not "unavailable". Unsupported analyses are stated as unsupported. | System prompt, evals |
+| Hedge preservation | Qualified statements from specialists ("likely", "may reflect") are not restated as fact. | System prompt |
+| No investment advice | No buy, sell or hold recommendations. Replies carry a not-financial-advice notice. | System prompt, `gateway/guardrails.py`, evals |
+| Independent review | The Chief cannot report a review result unless the Independent Risk and Evidence Officer returned it. | System prompt |
+| Credit approval | The model cannot approve its own spending. | Code (`gateway/approvals.py`) |
+| Rate limit | 20 requests per minute per user. | Code (`gateway/guardrails.py`) |
+| Conversation cap | 40 model turns and 400,000 tokens per conversation. | Code (`gateway/bounded_agent.py`) |
+
+Rules enforced by the system prompt are not hard guarantees. The evals (see
+[Evals](#evals)) measure compliance after the fact but do not block a reply.
+
+---
+
 ## Quick start
 
 **Step 1: create your secrets file.** Copy the template:
