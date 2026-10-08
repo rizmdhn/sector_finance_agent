@@ -51,6 +51,8 @@ Credit protection (original ingest plan doc, section 6):
   - 404s are negative-cached briefly via the injected Cache. 429/5xx are never cached.
 """
 
+import time
+
 import httpx
 
 from data import credit_gate
@@ -100,6 +102,19 @@ class SectorsNotFoundError(SectorsAPIError):
 
 class SectorsRateLimitError(SectorsAPIError):
     pass
+
+
+RATE_LIMIT_RETRY_DELAYS_SECONDS = (2, 5)
+RATE_LIMIT_MAX_WAIT_SECONDS = 15
+
+
+def _retry_after(response, default: float) -> float:
+    """Seconds to wait before retrying a 429: Sectors' Retry-After if it sent a number,
+    capped so a tool call never stalls for long, otherwise our own default."""
+    try:
+        return min(float(response.headers.get("Retry-After")), RATE_LIMIT_MAX_WAIT_SECONDS)
+    except (TypeError, ValueError, AttributeError):
+        return default
 
 
 class SectorsAuthError(SectorsAPIError):
@@ -159,8 +174,17 @@ class SectorsClient:
             gate.check(description, credits)
         credit_gate.record_spend(description, credits)
 
-        self._rate_limiter.acquire()
-        response = self._http.get(path, params=query)
+        # A 429 is Sectors' own server-side limit, which our TokenBucket can only guess at
+        # (and the gateway and ingest worker each have their own bucket). Waiting briefly
+        # and retrying fixes most of these: the user's question just takes a few seconds
+        # longer instead of failing. Honours Retry-After when Sectors sends it. Same call,
+        # already approved and already counted, so no second approval or credit record.
+        for delay in (*RATE_LIMIT_RETRY_DELAYS_SECONDS, None):
+            self._rate_limiter.acquire()
+            response = self._http.get(path, params=query)
+            if response.status_code != 429 or delay is None:
+                break
+            time.sleep(_retry_after(response, delay))
 
         if response.status_code == 404:
             if self._cache is not None:

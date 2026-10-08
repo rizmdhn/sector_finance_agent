@@ -1,30 +1,54 @@
-"""Real bug found live (2026-10-01): a 429 response used to fall through to
-`response.raise_for_status()`, an unhandled httpx.HTTPStatusError that crashed
-whichever ingest job (or the whole worker process, on a fresh install's bootstrap
-burst) hit it. SectorsClient must raise the dedicated SectorsRateLimitError
-instead, so callers can catch it specifically."""
+"""429 handling: a short wait-and-retry first (most 429s are a momentary burst), and only
+then the dedicated SectorsRateLimitError, so callers can catch it instead of crashing."""
 
-from data.sectors_client import SectorsClient, SectorsRateLimitError
+import pytest
+
+from data.sectors_client import RATE_LIMIT_RETRY_DELAYS_SECONDS, SectorsClient, SectorsRateLimitError
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int):
+    def __init__(self, status_code: int, retry_after=None):
         self.status_code = status_code
         self.text = "rate limited"
+        self.headers = {"Retry-After": retry_after} if retry_after is not None else {}
 
     def raise_for_status(self):
-        raise AssertionError("should not reach raise_for_status on a 429")
+        if self.status_code >= 400:
+            raise AssertionError("should not reach raise_for_status on a 429")
 
     def json(self):
-        return {}
+        return {"ok": True}
 
 
-def test_get_raises_rate_limit_error_on_429():
+@pytest.fixture
+def slept(monkeypatch):
+    waits = []
+    monkeypatch.setattr("data.sectors_client.time.sleep", waits.append)
+    return waits
+
+
+def _client(responses):
     client = SectorsClient(api_key="x", base_url="https://example.invalid/v2/")
-    client._http.get = lambda path, params=None: _FakeResponse(429)
+    queue = list(responses)
+    client._http.get = lambda path, params=None: queue.pop(0)
+    return client
 
-    try:
-        client._get("daily_universe_close", trade_date="2026-09-29")
-        assert False, "expected SectorsRateLimitError"
-    except SectorsRateLimitError as exc:
-        assert exc.status_code == 429
+
+def test_a_brief_429_is_retried_and_succeeds(slept):
+    client = _client([_FakeResponse(429), _FakeResponse(200)])
+    assert client._get("daily_universe_close", date="2026-09-29") == {"ok": True}
+    assert slept == [RATE_LIMIT_RETRY_DELAYS_SECONDS[0]]
+
+
+def test_retry_after_header_is_honoured_but_capped(slept):
+    client = _client([_FakeResponse(429, "3"), _FakeResponse(429, "999"), _FakeResponse(200)])
+    client._get("daily_universe_close", date="2026-09-29")
+    assert slept == [3.0, 15]
+
+
+def test_still_limited_after_retries_raises_rate_limit_error(slept):
+    client = _client([_FakeResponse(429)] * (len(RATE_LIMIT_RETRY_DELAYS_SECONDS) + 1))
+    with pytest.raises(SectorsRateLimitError) as exc:
+        client._get("daily_universe_close", date="2026-09-29")
+    assert exc.value.status_code == 429
+    assert slept == list(RATE_LIMIT_RETRY_DELAYS_SECONDS)

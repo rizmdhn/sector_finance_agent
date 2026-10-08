@@ -205,9 +205,9 @@ export default function App() {
         ))}
       {!readiness.price_data_ready && (
         <div className="price-data-banner">
-          Recent price history hasn't landed yet — it's pulled once a day after market close (~16:00-19:00 WIB), not
-          eagerly on startup, to keep Sectors API credit usage minimal. Portfolio, liquidity and returns figures will
-          show as unavailable until then; everything else (company reports, ownership, fundamentals) works now.
+          No price history is stored yet. Portfolio values still work: the agent fetches each stock's latest price
+          when you ask (1 credit per stock, you approve first). Index-wide moves (e.g. LQ45), returns and liquidity
+          need stored history, which arrives from the daily market-close pull if your Sectors plan includes it.
         </div>
       )}
       <nav className="top-nav">
