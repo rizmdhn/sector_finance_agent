@@ -15,6 +15,10 @@ from psycopg.rows import dict_row
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+
+# A close day with at least this many symbols was a whole-market load (~960 listed).
+WHOLE_MARKET_MIN_ROWS = 500
+
 class Database:
     def __init__(self, dsn: str):
         self._dsn = dsn
@@ -152,6 +156,51 @@ class Database:
                 """,
                 (symbol, start, end),
             ).fetchall()
+
+    def get_close_progress(self, trade_date: date) -> dict | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT next_offset, total_count, complete FROM close_ingest_progress WHERE trade_date = %s",
+                (trade_date,),
+            ).fetchone()
+
+    def save_close_progress(self, trade_date: date, next_offset: int, total_count: int | None, complete: bool) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO close_ingest_progress (trade_date, next_offset, total_count, complete)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (trade_date) DO UPDATE SET next_offset = EXCLUDED.next_offset,
+                    total_count = EXCLUDED.total_count, complete = EXCLUDED.complete, updated_at = now()
+                """,
+                (trade_date, next_offset, total_count, complete),
+            )
+
+    def incomplete_close_dates(self) -> list[date]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT trade_date FROM close_ingest_progress WHERE NOT complete ORDER BY trade_date"
+            ).fetchall()
+            return [r["trade_date"] for r in rows]
+
+    def latest_complete_close_date(self) -> date | None:
+        """Newest fully loaded close day. Days loaded before progress was tracked were only
+        ever written whole, so a date holding a whole-market load also counts. The row
+        threshold keeps the per-stock price refresh (which writes a handful of symbols per
+        date) from being mistaken for a finished day — that would skip the real load."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT GREATEST(
+                    (SELECT max(trade_date) FROM close_ingest_progress WHERE complete),
+                    (SELECT max(trade_date) FROM (
+                        SELECT trade_date FROM price_daily GROUP BY trade_date HAVING count(*) >= %s
+                     ) d WHERE NOT EXISTS (SELECT 1 FROM close_ingest_progress c WHERE c.trade_date = d.trade_date))
+                ) AS d
+                """,
+                (WHOLE_MARKET_MIN_ROWS,),
+            ).fetchone()
+            return row["d"] if row else None
 
     def latest_trade_date(self) -> date | None:
         with self._connect() as conn:

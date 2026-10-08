@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS price_daily (
 );
 CREATE INDEX IF NOT EXISTS price_daily_trade_date_idx ON price_daily (trade_date);
 
+-- How far the whole-market close pull got for each trading date. Every page is written
+-- to price_daily as it arrives, so a run stopped by a 429 keeps what it paid for; the
+-- next run (scheduled or manual) continues from next_offset instead of page one.
+CREATE TABLE IF NOT EXISTS close_ingest_progress (
+    trade_date   DATE PRIMARY KEY,
+    next_offset  INTEGER NOT NULL DEFAULT 0,
+    total_count  INTEGER,
+    complete     BOOLEAN NOT NULL DEFAULT false,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- INGEST change detector: latest quarterly financial dates, per symbol.
 -- Diffing the previous snapshot against a new pull bumps the symbol's
 -- Valkey version (Cache.bump_symbol_version) and fund_epoch.

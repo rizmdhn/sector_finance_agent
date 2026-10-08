@@ -19,11 +19,23 @@ def test_weekdays_between_single_day():
 
 class _FakeDB:
     def __init__(self, latest):
-        self._latest = latest
+        self._latest = latest  # newest whole day stored before progress tracking existed
         self.upserted: list[dict] = []
+        self.progress: dict = {}
 
-    def latest_trade_date(self):
-        return self._latest
+    def latest_complete_close_date(self):
+        done = [d for d, p in self.progress.items() if p["complete"]]
+        candidates = [d for d in done + [self._latest] if d is not None]
+        return max(candidates) if candidates else None
+
+    def incomplete_close_dates(self):
+        return sorted(d for d, p in self.progress.items() if not p["complete"])
+
+    def get_close_progress(self, trade_date):
+        return self.progress.get(trade_date)
+
+    def save_close_progress(self, trade_date, next_offset, total_count, complete):
+        self.progress[trade_date] = {"next_offset": next_offset, "total_count": total_count, "complete": complete}
 
     def upsert_price_rows(self, rows):
         self.upserted.extend(rows)
@@ -32,6 +44,13 @@ class _FakeDB:
 class _FakeCache:
     def __init__(self):
         self.bumped = 0
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value, ttl=None):
+        self.data[key] = value
 
     def bump_epoch(self, name):
         self.bumped += 1
@@ -158,3 +177,55 @@ def test_run_propagates_rate_limit_error_uncaught():
         assert False, "expected SectorsRateLimitError to propagate"
     except SectorsRateLimitError:
         pass
+
+
+def test_rate_limit_mid_day_keeps_pages_in_postgres_and_rerun_resumes():
+    """Live (2026-10-08): a manual pull hit 429 part-way through a day and saved nothing.
+    Each page must be written as it arrives, and the next run (manual or scheduled) must
+    continue from the page that failed instead of buying the day again."""
+
+    class _Paged(_FakeClient):
+        def __init__(self):
+            super().__init__(landed_dates={"2026-10-08"})
+            self.calls, self.fail_at = [], 40
+
+        def get_daily_universe_close(self, trade_date, offset=0):
+            self.calls.append(offset)
+            if offset == self.fail_at:
+                raise SectorsRateLimitError(429, "slow down")
+            row = {"symbol": f"S{offset}.JK", "date": trade_date, "close": 1}
+            return {"results": [row] * 20, "pagination": {"has_next": offset < 60, "next_offset": offset + 20, "total_count": 80}}
+
+    day = date(2026, 10, 8)
+    db, cache, client = _FakeDB(latest=None), _FakeCache(), _Paged()
+    try:
+        run(db, cache, client, today=day, max_backfill_days=0)
+        assert False, "expected SectorsRateLimitError"
+    except SectorsRateLimitError as exc:
+        assert "offset 40 of 80" in str(exc)
+    assert len(db.upserted) == 40  # the two pages paid for are already in Postgres
+    assert db.progress[day] == {"next_offset": 40, "total_count": 80, "complete": False}
+
+    client.fail_at, client.calls = None, []
+    run(db, cache, client, today=day, max_backfill_days=0)
+    assert client.calls == [40, 60]  # resumed, pages 0 and 20 not bought again
+    assert len(db.upserted) == 80 and db.progress[day]["complete"]
+
+    client.calls = []
+    run(db, cache, client, today=day, max_backfill_days=0)
+    assert client.calls == []  # complete day: nothing more to buy
+
+
+def test_a_cut_off_older_day_is_finished_before_new_days():
+    db, cache = _FakeDB(latest=None), _FakeCache()
+    db.save_close_progress(date(2026, 10, 7), 20, 40, complete=False)
+    db.save_close_progress(date(2026, 10, 6), 40, 40, complete=True)
+    calls = []
+
+    class _C(_FakeClient):
+        def get_daily_universe_close(self, trade_date, offset=0):
+            calls.append((trade_date, offset))
+            return {"results": [{"symbol": "X.JK", "date": trade_date, "close": 1}], "pagination": {"has_next": False}}
+
+    run(db, cache, _C(landed_dates=set()), today=date(2026, 10, 8))
+    assert calls == [("2026-10-07", 20), ("2026-10-08", 0)]

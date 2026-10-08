@@ -19,12 +19,13 @@ backfills them per symbol on demand from the per-symbol daily/{symbol}/ endpoint
 which does have full OHLCV + market cap.
 """
 
+import logging
 from datetime import date, timedelta
 
 from data.cache import EPOCH_PRICE, Cache
 from data.canonical import idx_today
 from data.db import Database
-from data.sectors_client import SectorsAPIError, SectorsClient
+from data.sectors_client import SectorsAPIError, SectorsClient, SectorsRateLimitError
 
 # ponytail: no IDX trading-holiday calendar, so a weekday holiday in the backfill
 # window gets re-fetched (1 empty page, cheap) on every run forever, same ambiguity
@@ -38,84 +39,90 @@ from data.sectors_client import SectorsAPIError, SectorsClient
 # if a real outage ever needs more than 2 weeks of catch-up.
 MAX_BACKFILL_DAYS = 14
 
+logger = logging.getLogger(__name__)
+
+
 
 def _weekdays_between(start: date, end: date) -> list[date]:
     """Every Mon-Fri date in [start, end], inclusive."""
     return [start + timedelta(days=n) for n in range((end - start).days + 1) if (start + timedelta(days=n)).weekday() < 5]
 
 
-def _fetch_close(client: SectorsClient, trade_date: date) -> list[dict]:
-    rows = []
-    offset = 0
+def _price_row(r: dict) -> dict:
+    return {
+        "symbol": r["symbol"],
+        "trade_date": date.fromisoformat(r["date"]),
+        "open": None,
+        "high": None,
+        "low": None,
+        "close": r.get("close"),
+        "volume": None,
+        "market_cap": None,
+    }
+
+
+def _fetch_close(db: Database, client: SectorsClient, trade_date: date) -> int:
+    """Load one trading day page by page, writing each page to Postgres as it arrives and
+    recording how far it got (close_ingest_progress). A 429 therefore keeps every page
+    already paid for, and the next run resumes at the page that failed. Returns rows
+    written by this call (0 = holiday / not published yet / already complete)."""
+    progress = db.get_close_progress(trade_date)
+    if progress and progress["complete"]:
+        return 0
+    offset = progress["next_offset"] if progress else 0
+    total = progress["total_count"] if progress else None
+    written = 0
     while True:
         try:
             response = client.get_daily_universe_close(trade_date.isoformat(), offset=offset)
+        except SectorsRateLimitError as exc:
+            raise SectorsRateLimitError(
+                429,
+                f"rate limited on {trade_date} at offset {offset} of {total or '?'}; rows before it are "
+                f"saved, run again to continue from there ({exc})",
+            ) from exc
         except SectorsAPIError as exc:
-            # Real bug found live (2026-10-01): the API doesn't just return an
-            # empty result set for "not landed yet" — for `idx_today()` itself it
-            # can outright 400 with "Date cannot be in the future" (their server's
-            # own data-availability clock apparently lags Jakarta wall-clock by
-            # up to a day). Before this fix that 400 propagated uncaught, crashing
-            # the WHOLE job — including the scheduler's real production poll, not
-            # just a manual/backfill run. Treated identically to "not landed yet"
-            # (empty rows), matching the existing semantics for that case.
+            # Live (2026-10-01): for idx_today() Sectors can 400 with "Date cannot be in
+            # the future" (its clock lags Jakarta's) — same as not published yet.
             if "in the future" in str(exc).lower():
-                return []
+                return written
             raise
         page = response.get("results", [])
-        rows.extend(page)
+        if not page and offset == 0:
+            return 0  # holiday, or today's close not published yet — try again next poll
+        db.upsert_price_rows([_price_row(r) for r in page])
+        written += len(page)
         pagination = response.get("pagination", {})
-        if not pagination.get("has_next"):
-            break
+        total = pagination.get("total_count", total)
+        has_next = bool(pagination.get("has_next")) and bool(page)
         offset = pagination.get("next_offset", offset + len(page))
-    return rows
+        db.save_close_progress(trade_date, offset, total, complete=not has_next)
+        if not has_next:
+            return written
+        logger.info("close %s: %s/%s rows", trade_date, offset, total)
 
 
 def run(
     db: Database, cache: Cache, client: SectorsClient, today: date | None = None, max_backfill_days: int = MAX_BACKFILL_DAYS
 ) -> None:
     today = today or idx_today()
-    latest = db.latest_trade_date()
-    if latest == today:
+    latest = db.latest_complete_close_date()
+    pending = db.incomplete_close_dates()  # days a 429 (or a crash) cut off part-way
+    if latest == today and not pending:
         return
 
-    # Real bug found live (2026-10-01), reproduced from a genuinely fresh/empty
-    # database: `latest` is None on a brand-new install, and `start = today` in
-    # that case meant the very first ingest run only ever attempted TODAY's
-    # date — which can itself get rejected as "in the future" (see _fetch_close)
-    # or just not be posted yet — leaving the database permanently empty with no
-    # error raised. An empty database gets the same backfill window (capped by
-    # `max_backfill_days`) as a long outage, not a narrower "just today" one;
-    # there's no meaningful difference between "never ingested" and "very out of
-    # date" here. `max_backfill_days` defaults to MAX_BACKFILL_DAYS — pass a
-    # smaller value for an explicit lighter catch-up (e.g. from scripts/manage.py)
-    # when the full window's credit cost isn't wanted. ingest/scheduler.py's normal
-    # cron poll never needs this at all: it only ever asks for `latest+1` onward.
+    # An empty database gets the same capped backfill window as a long outage (live bug
+    # 2026-10-01: starting at today alone could leave it empty for good). The cap keeps a
+    # long outage from turning into hundreds of paid pages; pass a smaller
+    # max_backfill_days for a lighter manual catch-up.
     start = (latest + timedelta(days=1)) if latest else today - timedelta(days=max_backfill_days)
     if start < today - timedelta(days=max_backfill_days):
         start = today - timedelta(days=max_backfill_days)
 
     bumped = False
-    for trade_date in _weekdays_between(start, today):
-        rows = _fetch_close(client, trade_date)
-        if not rows:
-            continue  # holiday, or (only possible for trade_date == today) not landed yet
-        db.upsert_price_rows(
-            [
-                {
-                    "symbol": r["symbol"],
-                    "trade_date": date.fromisoformat(r["date"]),
-                    "open": None,
-                    "high": None,
-                    "low": None,
-                    "close": r.get("close"),
-                    "volume": None,
-                    "market_cap": None,
-                }
-                for r in rows
-            ]
-        )
-        bumped = True
+    for trade_date in sorted(set(pending) | set(_weekdays_between(start, today))):
+        if _fetch_close(db, client, trade_date):
+            bumped = True
 
     if bumped:
         cache.bump_epoch(EPOCH_PRICE)
